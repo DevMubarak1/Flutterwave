@@ -13,16 +13,16 @@ npx skills add DevMubarak1/Flutterwave
 ## Steps to Use Skills.sh
 
 1. Browse the registry: https://skills.sh/
-2. Install from registry by skill name:
+2. Install from registry by skill name (example):
 
 ```bash
-npx skills add <skill-name>
+npx skills add flutterwave-setup
 ```
 
-3. Install directly from GitHub or GitLab repository:
+3. Install directly from GitHub/GitLab using owner/repo (full Flutterwave collection):
 
 ```bash
-npx skills add owner/repo
+npx skills add DevMubarak1/Flutterwave
 ```
 
 4. View installed skills:
@@ -30,6 +30,16 @@ npx skills add owner/repo
 ```bash
 npx skills list
 ```
+
+5. Common Flutterwave skill names to look for:
+
+- flutterwave-setup
+- flutterwave-webhooks
+- flutterwave-standard-checkout
+- flutterwave-card-payments
+- flutterwave-transfers
+- flutterwave-virtual-accounts
+- flutterwave-mobile-money
 
 ## Why This Repo
 
