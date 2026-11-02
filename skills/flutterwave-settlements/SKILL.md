@@ -1,109 +1,120 @@
 ---
 name: flutterwave-settlements
-description: Fetch and reconcile settlement reports across currencies and subaccounts.
+description: Reconcile payouts and ledger deposits, inspect settlement batches, and audit transaction fee deductions.
 ---
 
 # flutterwave-settlements
 
 ## Purpose
 
-Fetch and reconcile settlement reports across currencies and subaccounts.
+Retrieve settlement batches and fee deduction breakdowns. Flutterwave automatically aggregates settled payments and initiates payouts to the merchant's registered corporate bank account on defined cycles (T+1 for local cards, T+5 for international cards).
 
 ## Implementation Pattern (TypeScript)
 
 ```ts
-const FLW_V3_BASE_URL = process.env.FLW_V3_BASE_URL ?? "https://api.flutterwave.com/v3";
-const FLW_V4_BASE_URL = process.env.FLW_V4_BASE_URL ?? "https://developersandbox-api.flutterwave.com";
-const FLW_SECRET_KEY = process.env.FLW_SECRET_KEY;
+export interface SettlementRecord {
+  id: number;
+  account_id: number;
+  merchant_name: string;
+  bank_name: string;
+  account_number: string;
+  gross_amount: number;
+  net_amount: number;
+  app_fee: number;
+  merchant_fee: number;
+  chargeback: number;
+  refund: number;
+  status: "completed" | "pending" | string;
+  currency: string;
+  due_date: string;
+  processed_date: string;
+}
 
-type FlwResponse<T> = {
-  status: "success" | "error";
-  message: string;
-  data: T;
-};
-
-class FlutterwaveApiError extends Error {
+export class FlutterwaveSettlementService {
   constructor(
-    message: string,
-    public readonly statusCode: number,
-    public readonly payload?: unknown,
+    private readonly secretKey: string = process.env.FLW_SECRET_KEY!,
+    private readonly baseUrl: string = "https://api.flutterwave.com/v3",
   ) {
-    super(message);
-    this.name = "FlutterwaveApiError";
-  }
-}
-
-function getBaseUrl(version: "v3" | "v4") {
-  return version === "v3" ? FLW_V3_BASE_URL : FLW_V4_BASE_URL;
-}
-
-async function flwRequest<T>(
-  version: "v3" | "v4",
-  path: string,
-  init: RequestInit = {},
-): Promise<FlwResponse<T>> {
-  if (!FLW_SECRET_KEY) {
-    throw new Error("Missing FLW_SECRET_KEY");
+    if (!this.secretKey) {
+      throw new Error("Missing FLW_SECRET_KEY");
+    }
   }
 
-  const response = await fetch(`${getBaseUrl(version)}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${FLW_SECRET_KEY}`,
-      ...(init.headers ?? {}),
-    },
-  });
+  /**
+   * Retrieves past settlements with optional date filtering.
+   */
+  async listSettlements(filters: { from?: string; to?: string; page?: number } = {}) {
+    const query = new URLSearchParams();
+    if (filters.from) query.set("from", filters.from);
+    if (filters.to) query.set("to", filters.to);
+    if (filters.page) query.set("page", filters.page.toString());
 
-  const body = (await response.json()) as FlwResponse<T>;
+    const res = await fetch(`${this.baseUrl}/settlements?${query.toString()}`, {
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+    });
 
-  if (!response.ok || body.status === "error") {
-    throw new FlutterwaveApiError(
-      body.message || "Flutterwave API request failed",
-      response.status,
-      body,
-    );
+    const body = await res.json();
+    if (!res.ok || body.status !== "success") {
+      throw new Error(`Failed to list settlements: ${body.message}`);
+    }
+
+    return body.data as SettlementRecord[];
   }
 
-  return body;
+  /**
+   * Fetches detailed breakdown of a specific settlement batch.
+   */
+  async getSettlement(settlementId: number | string) {
+    const res = await fetch(`${this.baseUrl}/settlements/${settlementId}`, {
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    const body = await res.json();
+    if (!res.ok || body.status !== "success") {
+      throw new Error(`Failed to fetch settlement #${settlementId}: ${body.message}`);
+    }
+
+    return body.data;
+  }
 }
 ```
 
 ## Endpoint Operations and References
 
-| Version | Method | Route / Operation | Use Case | Reference |
+| Version | Method | Route / Operation | Description | Reference |
 | --- | --- | --- | --- | --- |
-| v3 | GET | /settlements | List settlements | https://developer.flutterwave.com/docs/settlements |
-| v4 | GET | /settlement | List settlements | https://developer.flutterwave.com/reference/settlement_list |
-| v4 | GET | /settlement/{id} | Retrieve settlement | https://developer.flutterwave.com/reference/settlement_get |
-| v4 | GET | /fees | Join fee records for net settlement | https://developer.flutterwave.com/reference/fees_get |
-
-## Country / Rail Matrix
-
-| Market | Rail | Integration Notes |
-| --- | --- | --- |
-| All | Daily settlement cut | Schedule nightly reconciliation. |
-| All | Subaccount split settlement | Join split metadata at transaction level. |
-| All | Multi-currency settlement | Report by currency and converted base view. |
+| v3 | GET | `/settlements` | List settlements with date range | https://developer.flutterwave.com/docs/transactions/settlements.md |
+| v3 | GET | `/settlements/{id}` | Inspect settlement batch items | https://developer.flutterwave.com/reference/settlements_get |
+| v4 | GET | `/settlement` | Query v4 settlements | https://developer.flutterwave.com/reference/settlement_list |
 
 ## Usage Example
 
 ```ts
-export async function runSettlementsExample() {
-  return flwRequest<unknown>("v4", "/settlement", {
-    method: "GET",
+import { FlutterwaveSettlementService } from "./flutterwave-settlements";
+
+export async function auditRecentSettlements() {
+  const service = new FlutterwaveSettlementService();
+  const settlements = await service.listSettlements({
+    from: "2026-10-01",
+    to: "2026-10-31",
   });
+
+  for (const s of settlements) {
+    console.log(`Settlement ${s.id}: Net ${s.net_amount} ${s.currency} deposited to ${s.bank_name}`);
+  }
+
+  return settlements;
 }
 ```
 
 ## Reliability Checklist
 
-- Re-verify successful payment state server-side before fulfillment.
-- Store provider ids, internal ids, tx_ref, and event ids for reconciliation.
-- Keep webhook consumers idempotent and return HTTP 200 quickly.
-- Separate version-specific request/response types to avoid schema mixups.
-
-## v4 Delta Note
-
-v4 is resource-centric in the public reference. Keep route maps and payload types versioned in code so agent-generated integrations remain accurate.
-
+- Note settlement timelines: Local currency card transactions settle T+1 (business days); international card transactions typically settle T+5.
+- Match settlement `net_amount` against your bank account statement credits for financial closing.
+- Use `gross_amount` minus `merchant_fee` to verify accounting deductions.

@@ -1,110 +1,135 @@
 ---
 name: flutterwave-virtual-accounts
-description: Create and manage dedicated virtual accounts for bank transfer collections.
+description: Generate dedicated permanent or dynamic virtual bank accounts for customer direct deposits and automated wallet funding.
 ---
 
 # flutterwave-virtual-accounts
 
 ## Purpose
 
-Create and manage dedicated virtual accounts for bank transfer collections.
+Create reserved virtual bank accounts for customers. Each account functions as a real Nigerian bank account (e.g. Wema Bank, Sterling Bank). Transfers into these account numbers automatically credit the merchant's Flutterwave wallet and trigger `charge.completed` webhook notifications tied to the customer's reference.
 
 ## Implementation Pattern (TypeScript)
 
 ```ts
-const FLW_V3_BASE_URL = process.env.FLW_V3_BASE_URL ?? "https://api.flutterwave.com/v3";
-const FLW_V4_BASE_URL = process.env.FLW_V4_BASE_URL ?? "https://developersandbox-api.flutterwave.com";
-const FLW_SECRET_KEY = process.env.FLW_SECRET_KEY;
+export interface CreateVirtualAccountOptions {
+  email: string;
+  isPermanent?: boolean;
+  bvn?: string; // Nigerian Bank Verification Number (required for permanent KYC accounts)
+  txRef: string;
+  phonenumber?: string;
+  firstname: string;
+  lastname: string;
+  narration?: string;
+  amount?: number; // Specify amount for fixed dynamic accounts, or 0/omit for static
+}
 
-type FlwResponse<T> = {
-  status: "success" | "error";
-  message: string;
-  data: T;
-};
+export interface VirtualAccountRecord {
+  response_code: string;
+  response_message: string;
+  order_ref: string;
+  account_number: string;
+  bank_name: string;
+  account_status: string;
+  created_at: string;
+}
 
-class FlutterwaveApiError extends Error {
+export class FlutterwaveVirtualAccountService {
   constructor(
-    message: string,
-    public readonly statusCode: number,
-    public readonly payload?: unknown,
+    private readonly secretKey: string = process.env.FLW_SECRET_KEY!,
+    private readonly baseUrl: string = "https://api.flutterwave.com/v3",
   ) {
-    super(message);
-    this.name = "FlutterwaveApiError";
-  }
-}
-
-function getBaseUrl(version: "v3" | "v4") {
-  return version === "v3" ? FLW_V3_BASE_URL : FLW_V4_BASE_URL;
-}
-
-async function flwRequest<T>(
-  version: "v3" | "v4",
-  path: string,
-  init: RequestInit = {},
-): Promise<FlwResponse<T>> {
-  if (!FLW_SECRET_KEY) {
-    throw new Error("Missing FLW_SECRET_KEY");
+    if (!this.secretKey) {
+      throw new Error("Missing FLW_SECRET_KEY");
+    }
   }
 
-  const response = await fetch(`${getBaseUrl(version)}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${FLW_SECRET_KEY}`,
-      ...(init.headers ?? {}),
-    },
-  });
+  /**
+   * Generates a permanent dedicated virtual account for a customer.
+   */
+  async createVirtualAccount(
+    options: CreateVirtualAccountOptions,
+  ): Promise<VirtualAccountRecord> {
+    const res = await fetch(`${this.baseUrl}/virtual-account-numbers`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        email: options.email,
+        is_permanent: options.isPermanent ?? true,
+        bvn: options.bvn,
+        tx_ref: options.txRef,
+        phonenumber: options.phonenumber,
+        firstname: options.firstname,
+        lastname: options.lastname,
+        narration: options.narration ?? `${options.firstname} ${options.lastname} Wallet`,
+      }),
+    });
 
-  const body = (await response.json()) as FlwResponse<T>;
+    const body = await res.json();
+    if (!res.ok || body.status !== "success") {
+      throw new Error(`Failed to create virtual account: ${body.message}`);
+    }
 
-  if (!response.ok || body.status === "error") {
-    throw new FlutterwaveApiError(
-      body.message || "Flutterwave API request failed",
-      response.status,
-      body,
-    );
+    return body.data;
   }
 
-  return body;
+  /**
+   * Retrieves virtual account details by order reference.
+   */
+  async getVirtualAccount(orderRef: string): Promise<VirtualAccountRecord> {
+    const res = await fetch(`${this.baseUrl}/virtual-account-numbers/${orderRef}`, {
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    const body = await res.json();
+    if (!res.ok || body.status !== "success") {
+      throw new Error(`Failed to retrieve virtual account: ${body.message}`);
+    }
+
+    return body.data;
+  }
 }
 ```
 
 ## Endpoint Operations and References
 
-| Version | Method | Route / Operation | Use Case | Reference |
+| Version | Method | Route / Operation | Description | Reference |
 | --- | --- | --- | --- | --- |
-| v3 | POST | /virtual-account-numbers | Create dedicated account | https://developer.flutterwave.com/docs/pay-with-bank-transfer |
-| v4 | POST | /virtual-accounts | Create virtual account | https://developer.flutterwave.com/reference/virtual_accounts_post |
-| v4 | GET | /virtual-accounts | List virtual accounts | https://developer.flutterwave.com/reference/virtual_accounts_list |
-| v4 | GET | /virtual-accounts/{id} | Retrieve account | https://developer.flutterwave.com/reference/virtual_account_get |
-| v4 | PUT | /virtual-accounts/{id} | Update account | https://developer.flutterwave.com/reference/virtual_accounts_put |
-
-## Country / Rail Matrix
-
-| Market | Rail | Integration Notes |
-| --- | --- | --- |
-| NGN | Dedicated account | High-volume transfer collection use case. |
-| KES/GHS | Regional VA support | Validate product availability by merchant profile. |
-| ZAR | Local transfer collection | Reconcile by account reference + tx_ref. |
+| v3 | POST | `/virtual-account-numbers` | Create permanent virtual account | https://developer.flutterwave.com/docs/virtual-accounts/virtual-accounts.md |
+| v3 | GET | `/virtual-account-numbers/{order_ref}` | Fetch virtual account details | https://developer.flutterwave.com/reference/virtual_account_numbers_get |
+| v4 | POST | `/virtual-accounts` | Next-gen static/dynamic virtual accounts | https://developer.flutterwave.com/reference/virtual_accounts_post |
+| v4 | GET | `/virtual-accounts` | List all virtual accounts | https://developer.flutterwave.com/reference/virtual_accounts_list |
 
 ## Usage Example
 
 ```ts
-export async function runVirtualAccountsExample() {
-  return flwRequest<unknown>("v4", "/virtual-accounts", {
-    method: "GET",
+import { FlutterwaveVirtualAccountService } from "./flutterwave-virtual-accounts";
+
+export async function provisionCustomerWallet() {
+  const service = new FlutterwaveVirtualAccountService();
+  const account = await service.createVirtualAccount({
+    email: "john.doe@example.com",
+    firstname: "John",
+    lastname: "Doe",
+    phonenumber: "08012345678",
+    bvn: "12345678901",
+    txRef: `USR-WALLET-${Date.now()}`,
+    isPermanent: true,
   });
+
+  console.log(`Dedicated Account Created: ${account.account_number} (${account.bank_name})`);
+  return account;
 }
 ```
 
 ## Reliability Checklist
 
-- Re-verify successful payment state server-side before fulfillment.
-- Store provider ids, internal ids, tx_ref, and event ids for reconciliation.
-- Keep webhook consumers idempotent and return HTTP 200 quickly.
-- Separate version-specific request/response types to avoid schema mixups.
-
-## v4 Delta Note
-
-v4 is resource-centric in the public reference. Keep route maps and payload types versioned in code so agent-generated integrations remain accurate.
-
+- In compliance with Central Bank regulations in Nigeria, permanent virtual accounts require a valid Bank Verification Number (BVN) matching the customer's name.
+- Store `order_ref` and `account_number` in your user records.
+- Listen for `charge.completed` webhooks and match by `customer.email` or `tx_ref` to credit the user wallet immediately upon incoming bank transfers.

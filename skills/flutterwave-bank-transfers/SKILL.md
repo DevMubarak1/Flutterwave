@@ -1,109 +1,117 @@
 ---
 name: flutterwave-bank-transfers
-description: Collect funds through bank transfer with account validation and asynchronous confirmation.
+description: Accept payments via direct Nigerian NIP bank transfers with dynamic dedicated account generation and webhook settlement.
 ---
 
 # flutterwave-bank-transfers
 
 ## Purpose
 
-Collect funds through bank transfer with account validation and asynchronous confirmation.
+Implement Pay with Bank Transfer collections. Generates dynamic, dedicated virtual bank accounts on demand. The customer transfers the exact amount via their bank app or USSD, and Flutterwave notifies your system via webhooks.
 
 ## Implementation Pattern (TypeScript)
 
 ```ts
-const FLW_V3_BASE_URL = process.env.FLW_V3_BASE_URL ?? "https://api.flutterwave.com/v3";
-const FLW_V4_BASE_URL = process.env.FLW_V4_BASE_URL ?? "https://developersandbox-api.flutterwave.com";
-const FLW_SECRET_KEY = process.env.FLW_SECRET_KEY;
+export interface BankTransferChargeOptions {
+  amount: number;
+  email: string;
+  txRef: string;
+  currency?: string; // defaults to NGN
+  duration?: number; // expiry in seconds, e.g. 3600 (1 hour)
+  frequency?: number;
+  narration?: string;
+  isPermanent?: boolean;
+}
 
-type FlwResponse<T> = {
-  status: "success" | "error";
-  message: string;
-  data: T;
-};
+export interface BankTransferAccountDetails {
+  transferAccount: string;
+  transferBank: string;
+  transferAmount: number;
+  transferReference: string;
+  accountExpiration: string;
+}
 
-class FlutterwaveApiError extends Error {
+export class FlutterwaveBankTransferService {
   constructor(
-    message: string,
-    public readonly statusCode: number,
-    public readonly payload?: unknown,
+    private readonly secretKey: string = process.env.FLW_SECRET_KEY!,
+    private readonly baseUrl: string = "https://api.flutterwave.com/v3",
   ) {
-    super(message);
-    this.name = "FlutterwaveApiError";
-  }
-}
-
-function getBaseUrl(version: "v3" | "v4") {
-  return version === "v3" ? FLW_V3_BASE_URL : FLW_V4_BASE_URL;
-}
-
-async function flwRequest<T>(
-  version: "v3" | "v4",
-  path: string,
-  init: RequestInit = {},
-): Promise<FlwResponse<T>> {
-  if (!FLW_SECRET_KEY) {
-    throw new Error("Missing FLW_SECRET_KEY");
+    if (!this.secretKey) {
+      throw new Error("Missing FLW_SECRET_KEY");
+    }
   }
 
-  const response = await fetch(`${getBaseUrl(version)}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${FLW_SECRET_KEY}`,
-      ...(init.headers ?? {}),
-    },
-  });
+  /**
+   * Generates dynamic bank transfer details for customer payment.
+   */
+  async generateTransferAccount(
+    options: BankTransferChargeOptions,
+  ): Promise<BankTransferAccountDetails> {
+    const res = await fetch(`${this.baseUrl}/charges?type=bank_transfer`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        amount: options.amount.toString(),
+        currency: options.currency ?? "NGN",
+        email: options.email,
+        tx_ref: options.txRef,
+        is_permanent: options.isPermanent ?? false,
+        duration: options.duration ?? 3600,
+        narration: options.narration ?? "Payment for Order",
+      }),
+    });
 
-  const body = (await response.json()) as FlwResponse<T>;
+    const body = await res.json();
+    if (!res.ok || body.status !== "success") {
+      throw new Error(`Failed to generate bank transfer instructions: ${body.message}`);
+    }
 
-  if (!response.ok || body.status === "error") {
-    throw new FlutterwaveApiError(
-      body.message || "Flutterwave API request failed",
-      response.status,
-      body,
-    );
+    const meta = body.meta.authorization;
+    return {
+      transferAccount: meta.transfer_account,
+      transferBank: meta.transfer_bank,
+      transferAmount: meta.transfer_amount,
+      transferReference: meta.transfer_reference,
+      accountExpiration: meta.account_expiration,
+    };
   }
-
-  return body;
 }
 ```
 
 ## Endpoint Operations and References
 
-| Version | Method | Route / Operation | Use Case | Reference |
+| Version | Method | Route / Operation | Description | Reference |
 | --- | --- | --- | --- | --- |
-| v3 | POST | /charges?type=bank_transfer | Start bank transfer collection | https://developer.flutterwave.com/docs/pay-with-bank-transfer |
-| v3 | GET | /banks/{country} | List supported banks | https://developer.flutterwave.com/docs/getting-started |
-| v4 | POST | /bank-account-resolve | Resolve account details | https://developer.flutterwave.com/reference/bank_account_resolve_post |
-| v4 | GET | /banks | Retrieve banks | https://developer.flutterwave.com/reference/banks_get |
-
-## Country / Rail Matrix
-
-| Market | Rail | Integration Notes |
-| --- | --- | --- |
-| NG | NIP transfer | Most common bank transfer flow. |
-| GH | Bank transfer + MoMo fallback | Fallback for incomplete transfer intent. |
-| KE | Bank transfer + M-Pesa | Offer mobile-first fallback. |
+| v3 | POST | `/charges?type=bank_transfer` | Generate dynamic bank transfer account | https://developer.flutterwave.com/docs/collecting-payments/bank-transfer.md |
+| v3 | GET | `/transactions/{id}/verify` | Verify bank transfer payment | https://developer.flutterwave.com/docs/transactions/verify.md |
+| v4 | POST | `/virtual-accounts` | Next-gen dynamic virtual account generation | https://developer.flutterwave.com/reference/virtual_accounts_post |
 
 ## Usage Example
 
 ```ts
-export async function runBankTransfersExample() {
-  return flwRequest<unknown>("v4", "/banks", {
-    method: "GET",
+import { FlutterwaveBankTransferService } from "./flutterwave-bank-transfers";
+
+export async function runBankTransferDemo() {
+  const service = new FlutterwaveBankTransferService();
+  const account = await service.generateTransferAccount({
+    amount: 5000,
+    email: "customer@example.com",
+    txRef: `TRANSFER-${Date.now()}`,
+    duration: 3600,
   });
+
+  console.log(`Pay into Bank: ${account.transferBank}`);
+  console.log(`Account Number: ${account.transferAccount}`);
+  console.log(`Expires at: ${account.accountExpiration}`);
+  return account;
 }
 ```
 
 ## Reliability Checklist
 
-- Re-verify successful payment state server-side before fulfillment.
-- Store provider ids, internal ids, tx_ref, and event ids for reconciliation.
-- Keep webhook consumers idempotent and return HTTP 200 quickly.
-- Separate version-specific request/response types to avoid schema mixups.
-
-## v4 Delta Note
-
-v4 is resource-centric in the public reference. Keep route maps and payload types versioned in code so agent-generated integrations remain accurate.
-
+- Advise customers to transfer the exact amount specified to ensure automated reconciliation.
+- Clearly present the account expiration timer on checkout screens (default: 1 hour).
+- Always rely on webhook notifications (`charge.completed`) rather than polling to reduce server load.

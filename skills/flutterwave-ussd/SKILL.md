@@ -1,108 +1,117 @@
 ---
 name: flutterwave-ussd
-description: Implement USSD charge flows and robust pending-to-success reconciliation.
+description: Initiate USSD payment sessions across major Nigerian banks, obtain bank-specific dial strings, and verify completion.
 ---
 
 # flutterwave-ussd
 
 ## Purpose
 
-Implement USSD charge flows and robust pending-to-success reconciliation.
+Implement Nigerian USSD payment flows. The merchant requests a USSD session for a specific bank code, Flutterwave returns an interactive dialing string (e.g. `*737*...#`), and the customer dials it on any mobile device to authorize payment.
 
 ## Implementation Pattern (TypeScript)
 
 ```ts
-const FLW_V3_BASE_URL = process.env.FLW_V3_BASE_URL ?? "https://api.flutterwave.com/v3";
-const FLW_V4_BASE_URL = process.env.FLW_V4_BASE_URL ?? "https://developersandbox-api.flutterwave.com";
-const FLW_SECRET_KEY = process.env.FLW_SECRET_KEY;
+export interface UssdChargeOptions {
+  amount: number;
+  email: string;
+  txRef: string;
+  accountBank: string; // 3-digit bank code, e.g. "058" (GTBank), "044" (Access Bank)
+  phoneNumber?: string;
+  currency?: string; // default: "NGN"
+}
 
-type FlwResponse<T> = {
-  status: "success" | "error";
-  message: string;
-  data: T;
-};
+export interface UssdChargeResult {
+  paymentCode: string;
+  note: string;
+  txRef: string;
+}
 
-class FlutterwaveApiError extends Error {
+export class FlutterwaveUssdService {
   constructor(
-    message: string,
-    public readonly statusCode: number,
-    public readonly payload?: unknown,
+    private readonly secretKey: string = process.env.FLW_SECRET_KEY!,
+    private readonly baseUrl: string = "https://api.flutterwave.com/v3",
   ) {
-    super(message);
-    this.name = "FlutterwaveApiError";
-  }
-}
-
-function getBaseUrl(version: "v3" | "v4") {
-  return version === "v3" ? FLW_V3_BASE_URL : FLW_V4_BASE_URL;
-}
-
-async function flwRequest<T>(
-  version: "v3" | "v4",
-  path: string,
-  init: RequestInit = {},
-): Promise<FlwResponse<T>> {
-  if (!FLW_SECRET_KEY) {
-    throw new Error("Missing FLW_SECRET_KEY");
+    if (!this.secretKey) {
+      throw new Error("Missing FLW_SECRET_KEY");
+    }
   }
 
-  const response = await fetch(`${getBaseUrl(version)}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${FLW_SECRET_KEY}`,
-      ...(init.headers ?? {}),
-    },
-  });
+  /**
+   * Generates a USSD dialing string for the customer.
+   */
+  async initiateUssd(options: UssdChargeOptions): Promise<UssdChargeResult> {
+    const res = await fetch(`${this.baseUrl}/charges?type=ussd`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        account_bank: options.accountBank,
+        amount: options.amount.toString(),
+        currency: options.currency ?? "NGN",
+        email: options.email,
+        tx_ref: options.txRef,
+        phone_number: options.phoneNumber,
+      }),
+    });
 
-  const body = (await response.json()) as FlwResponse<T>;
+    const body = await res.json();
+    if (!res.ok || body.status !== "success") {
+      throw new Error(`USSD initialization failed: ${body.message}`);
+    }
 
-  if (!response.ok || body.status === "error") {
-    throw new FlutterwaveApiError(
-      body.message || "Flutterwave API request failed",
-      response.status,
-      body,
-    );
+    const auth = body.meta.authorization;
+    return {
+      paymentCode: auth.note, // Contains dial string e.g. "*737*000*4928#"
+      note: auth.note,
+      txRef: options.txRef,
+    };
   }
-
-  return body;
 }
 ```
 
 ## Endpoint Operations and References
 
-| Version | Method | Route / Operation | Use Case | Reference |
+| Version | Method | Route / Operation | Description | Reference |
 | --- | --- | --- | --- | --- |
-| v3 | POST | /charges?type=ussd | Start USSD charge | https://developer.flutterwave.com/docs/ussd |
-| v3 | GET | /transactions/{id}/verify | Verify final status | https://developer.flutterwave.com/docs/getting-started |
-| v4 | POST | /charges | Create USSD-backed charge | https://developer.flutterwave.com/reference/charges_post |
+| v3 | POST | `/charges?type=ussd` | Generate USSD dial code | https://developer.flutterwave.com/docs/collecting-payments/ussd.md |
+| v3 | GET | `/banks/NG` | Fetch Nigerian bank codes | https://developer.flutterwave.com/docs/collecting-payments/banks.md |
+| v3 | GET | `/transactions/{id}/verify` | Verify USSD payment status | https://developer.flutterwave.com/docs/transactions/verify.md |
 
-## Country / Rail Matrix
+## Common Bank USSD Codes
 
-| Market | Rail | Integration Notes |
+| Bank | Code | Dial Pattern |
 | --- | --- | --- |
-| NG | USSD | Useful for low-data environments. |
-| GH | USSD + MoMo fallback | Fallback for unsupported bank codes. |
-| All | Webhook + periodic poll | USSD completion can be delayed. |
+| GTBank | `058` | `*737*...#` |
+| Access Bank | `044` | `*901*...#` |
+| Zenith Bank | `057` | `*966*...#` |
+| United Bank for Africa (UBA) | `033` | `*919*...#` |
+| Sterling Bank | `232` | `*822*...#` |
+| First Bank of Nigeria | `011` | `*894*...#` |
 
 ## Usage Example
 
 ```ts
-export async function runUssdExample() {
-  return flwRequest<unknown>("v4", "/charges", {
-    method: "GET",
+import { FlutterwaveUssdService } from "./flutterwave-ussd";
+
+export async function runUssdDemo() {
+  const service = new FlutterwaveUssdService();
+  const session = await service.initiateUssd({
+    accountBank: "058", // GTBank
+    amount: 3000,
+    email: "customer@example.com",
+    txRef: `USSD-${Date.now()}`,
   });
+
+  console.log("Customer instructions:", session.paymentCode);
+  return session;
 }
 ```
 
 ## Reliability Checklist
 
-- Re-verify successful payment state server-side before fulfillment.
-- Store provider ids, internal ids, tx_ref, and event ids for reconciliation.
-- Keep webhook consumers idempotent and return HTTP 200 quickly.
-- Separate version-specific request/response types to avoid schema mixups.
-
-## v4 Delta Note
-
-v4 is resource-centric in the public reference. Keep route maps and payload types versioned in code so agent-generated integrations remain accurate.
-
+- Display USSD dial codes in large, clear, tap-to-call formats (`tel:*737*...#`) on mobile browsers.
+- USSD sessions usually expire within 5 to 10 minutes; present a countdown timer.
+- Fulfill payments exclusively upon webhook confirmation or verified polling status.

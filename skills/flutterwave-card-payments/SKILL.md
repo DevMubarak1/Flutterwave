@@ -1,109 +1,125 @@
 ---
 name: flutterwave-card-payments
-description: Handle direct card charges including PIN, OTP, and 3DS continuations in a deterministic flow.
+description: Charge debit and credit cards directly with 3DES encryption, PIN/OTP/3DS authorization flows, and card tokenization.
 ---
 
 # flutterwave-card-payments
 
 ## Purpose
 
-Handle direct card charges including PIN, OTP, and 3DS continuations in a deterministic flow.
+Execute direct card charges via the Flutterwave API. Covers 3DES payload encryption, authorization handling (PIN, OTP, 3D Secure redirect), charge validation, and card tokenization for subsequent one-click charges.
 
 ## Implementation Pattern (TypeScript)
 
 ```ts
-const FLW_V3_BASE_URL = process.env.FLW_V3_BASE_URL ?? "https://api.flutterwave.com/v3";
-const FLW_V4_BASE_URL = process.env.FLW_V4_BASE_URL ?? "https://developersandbox-api.flutterwave.com";
-const FLW_SECRET_KEY = process.env.FLW_SECRET_KEY;
+import crypto from "node:crypto";
 
-type FlwResponse<T> = {
-  status: "success" | "error";
-  message: string;
-  data: T;
-};
+export interface CardChargePayload {
+  cardNumber: string;
+  cvv: string;
+  expiryMonth: string;
+  expiryYear: string;
+  currency: string;
+  amount: number;
+  email: string;
+  txRef: string;
+  fullname?: string;
+  pin?: string;
+}
 
-class FlutterwaveApiError extends Error {
+/**
+ * Encrypts raw card details using Triple DES (3DES-24) as required by Flutterwave v3.
+ */
+export function encryptCardPayload(key: string, text: string): string {
+  const cipher = crypto.createCipheriv("des-ede3", Buffer.from(key, "utf8"), "");
+  let encrypted = cipher.update(text, "utf8", "base64");
+  encrypted += cipher.final("base64");
+  return encrypted;
+}
+
+export class FlutterwaveCardPaymentService {
   constructor(
-    message: string,
-    public readonly statusCode: number,
-    public readonly payload?: unknown,
+    private readonly secretKey: string = process.env.FLW_SECRET_KEY!,
+    private readonly encKey: string = process.env.FLW_ENCRYPTION_KEY!,
+    private readonly baseUrl: string = "https://api.flutterwave.com/v3",
   ) {
-    super(message);
-    this.name = "FlutterwaveApiError";
-  }
-}
-
-function getBaseUrl(version: "v3" | "v4") {
-  return version === "v3" ? FLW_V3_BASE_URL : FLW_V4_BASE_URL;
-}
-
-async function flwRequest<T>(
-  version: "v3" | "v4",
-  path: string,
-  init: RequestInit = {},
-): Promise<FlwResponse<T>> {
-  if (!FLW_SECRET_KEY) {
-    throw new Error("Missing FLW_SECRET_KEY");
+    if (!this.secretKey || !this.encKey) {
+      throw new Error("Missing FLW_SECRET_KEY or FLW_ENCRYPTION_KEY");
+    }
   }
 
-  const response = await fetch(`${getBaseUrl(version)}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${FLW_SECRET_KEY}`,
-      ...(init.headers ?? {}),
-    },
-  });
+  /**
+   * Initiates direct encrypted card charge.
+   */
+  async chargeCard(cardPayload: CardChargePayload) {
+    const rawData = JSON.stringify({
+      card_number: cardPayload.cardNumber,
+      cvv: cardPayload.cvv,
+      expiry_month: cardPayload.expiryMonth,
+      expiry_year: cardPayload.expiryYear,
+      currency: cardPayload.currency,
+      amount: cardPayload.amount.toString(),
+      email: cardPayload.email,
+      fullname: cardPayload.fullname,
+      tx_ref: cardPayload.txRef,
+      pin: cardPayload.pin,
+      authorization: cardPayload.pin ? { mode: "pin", pin: cardPayload.pin } : undefined,
+    });
 
-  const body = (await response.json()) as FlwResponse<T>;
+    const client = encryptCardPayload(this.encKey, rawData);
 
-  if (!response.ok || body.status === "error") {
-    throw new FlutterwaveApiError(
-      body.message || "Flutterwave API request failed",
-      response.status,
-      body,
-    );
+    const res = await fetch(`${this.baseUrl}/charges?type=card`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ client }),
+    });
+
+    const body = await res.json();
+    return body;
   }
 
-  return body;
+  /**
+   * Validates a card charge that required OTP authorization.
+   */
+  async validateOtpCharge(flwRef: string, otp: string) {
+    const res = await fetch(`${this.baseUrl}/validate-charge`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        flw_ref: flwRef,
+        otp,
+        type: "card",
+      }),
+    });
+
+    return res.json();
+  }
 }
 ```
 
 ## Endpoint Operations and References
 
-| Version | Method | Route / Operation | Use Case | Reference |
+| Version | Method | Route / Operation | Description | Reference |
 | --- | --- | --- | --- | --- |
-| v3 | POST | /charges?type=card | Initiate card charge | https://developer.flutterwave.com/docs/card |
-| v3 | POST | /validate-charge | Submit OTP/PIN validation | https://developer.flutterwave.com/docs/charging-a-card |
-| v4 | POST | /charges | Create card charge | https://developer.flutterwave.com/reference/charges_post |
-| v4 | GET | /payment-methods | List available methods | https://developer.flutterwave.com/reference/payment_methods_list |
+| v3 | POST | `/charges?type=card` | Submit 3DES-encrypted card charge | https://developer.flutterwave.com/docs/collecting-payments/cards.md |
+| v3 | POST | `/validate-charge` | Submit OTP / challenge code | https://developer.flutterwave.com/reference/validate_charge |
+| v3 | GET | `/transactions/{id}/verify` | Verify final transaction state | https://developer.flutterwave.com/docs/transactions/verify.md |
+| v4 | POST | `/charges` | Charge stored `payment_method_id` | https://developer.flutterwave.com/reference/charges_post |
 
-## Country / Rail Matrix
+## Authorization Modes
 
-| Market | Rail | Integration Notes |
-| --- | --- | --- |
-| NG | Card (local + intl) | Expect OTP and issuer-specific challenges. |
-| GH | Card + Mobile fallback | Use fallback when issuer declines. |
-| KE | Card + M-Pesa fallback | Prioritize successful completion path. |
-
-## Usage Example
-
-```ts
-export async function runCardPaymentsExample() {
-  return flwRequest<unknown>("v4", "/charges", {
-    method: "GET",
-  });
-}
-```
+- `mode: "pin"`: Issuer requires 4-digit card PIN. Pass the PIN in payload or re-submit charge with `pin`.
+- `mode: "otp"`: Charge is pending OTP. Prompt customer and call `/validate-charge` with `flw_ref`.
+- `mode: "redirect"`: 3D Secure web challenge required. Redirect user to `meta.authorization.redirect`.
 
 ## Reliability Checklist
 
-- Re-verify successful payment state server-side before fulfillment.
-- Store provider ids, internal ids, tx_ref, and event ids for reconciliation.
-- Keep webhook consumers idempotent and return HTTP 200 quickly.
-- Separate version-specific request/response types to avoid schema mixups.
-
-## v4 Delta Note
-
-v4 is resource-centric in the public reference. Keep route maps and payload types versioned in code so agent-generated integrations remain accurate.
-
+- Ensure PCI DSS compliance. Direct raw card processing requires PCI DSS certification or tokenization in production.
+- Store the returned `card.token` from successful verification responses to allow tokenized 1-click charges.
+- Never log raw card PAN or CVV numbers in server logs or telemetry.

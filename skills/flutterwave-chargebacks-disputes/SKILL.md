@@ -1,111 +1,119 @@
 ---
 name: flutterwave-chargebacks-disputes
-description: Track and respond to dispute and chargeback cases with audit-ready evidence timelines.
+description: Monitor chargebacks, submit evidence against card disputes, accept claims, and track dispute lifecycle statuses.
 ---
 
 # flutterwave-chargebacks-disputes
 
 ## Purpose
 
-Track and respond to dispute and chargeback cases with audit-ready evidence timelines.
+Manage card and transaction disputes (chargebacks). Allows merchants to query open dispute notices, upload proof-of-delivery or fulfillment evidence before response deadlines, or accept liability to settle claims quickly.
 
 ## Implementation Pattern (TypeScript)
 
 ```ts
-const FLW_V3_BASE_URL = process.env.FLW_V3_BASE_URL ?? "https://api.flutterwave.com/v3";
-const FLW_V4_BASE_URL = process.env.FLW_V4_BASE_URL ?? "https://developersandbox-api.flutterwave.com";
-const FLW_SECRET_KEY = process.env.FLW_SECRET_KEY;
+export interface ChargebackRecord {
+  id: number;
+  amount: number;
+  currency: string;
+  flw_ref: string;
+  transaction_id: number;
+  status: "pending" | "declined" | "accepted" | "lost" | "won";
+  stage: string;
+  due_date: string;
+  comment?: string;
+  meta?: Record<string, unknown>;
+  created_at: string;
+}
 
-type FlwResponse<T> = {
-  status: "success" | "error";
-  message: string;
-  data: T;
-};
-
-class FlutterwaveApiError extends Error {
+export class FlutterwaveChargebackService {
   constructor(
-    message: string,
-    public readonly statusCode: number,
-    public readonly payload?: unknown,
+    private readonly secretKey: string = process.env.FLW_SECRET_KEY!,
+    private readonly baseUrl: string = "https://api.flutterwave.com/v3",
   ) {
-    super(message);
-    this.name = "FlutterwaveApiError";
-  }
-}
-
-function getBaseUrl(version: "v3" | "v4") {
-  return version === "v3" ? FLW_V3_BASE_URL : FLW_V4_BASE_URL;
-}
-
-async function flwRequest<T>(
-  version: "v3" | "v4",
-  path: string,
-  init: RequestInit = {},
-): Promise<FlwResponse<T>> {
-  if (!FLW_SECRET_KEY) {
-    throw new Error("Missing FLW_SECRET_KEY");
+    if (!this.secretKey) {
+      throw new Error("Missing FLW_SECRET_KEY");
+    }
   }
 
-  const response = await fetch(`${getBaseUrl(version)}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${FLW_SECRET_KEY}`,
-      ...(init.headers ?? {}),
-    },
-  });
+  /**
+   * Lists chargebacks with optional status filters.
+   */
+  async listChargebacks(status?: "pending" | "declined" | "accepted" | "lost" | "won") {
+    const query = status ? `?status=${status}` : "";
+    const res = await fetch(`${this.baseUrl}/chargebacks${query}`, {
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+    });
 
-  const body = (await response.json()) as FlwResponse<T>;
+    const body = await res.json();
+    if (!res.ok || body.status !== "success") {
+      throw new Error(`Failed to list chargebacks: ${body.message}`);
+    }
 
-  if (!response.ok || body.status === "error") {
-    throw new FlutterwaveApiError(
-      body.message || "Flutterwave API request failed",
-      response.status,
-      body,
-    );
+    return body.data as ChargebackRecord[];
   }
 
-  return body;
+  /**
+   * Responds to a chargeback by accepting liability or declining with proof.
+   */
+  async respondToChargeback(
+    chargebackId: number | string,
+    action: "accept" | "decline",
+    explanation?: string,
+  ) {
+    const res = await fetch(`${this.baseUrl}/chargebacks/${chargebackId}`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        action,
+        comment: explanation,
+      }),
+    });
+
+    const body = await res.json();
+    if (!res.ok || body.status !== "success") {
+      throw new Error(`Failed to update chargeback: ${body.message}`);
+    }
+
+    return body.data;
+  }
 }
 ```
 
 ## Endpoint Operations and References
 
-| Version | Method | Route / Operation | Use Case | Reference |
+| Version | Method | Route / Operation | Description | Reference |
 | --- | --- | --- | --- | --- |
-| v3 | GET | /disputes | List disputes | https://developer.flutterwave.com/docs/chargebacks-1 |
-| v3 | POST | /disputes/{id}/evidence | Submit evidence | https://developer.flutterwave.com/docs/chargebacks-1 |
-| v4 | GET | /chargebacks | List chargebacks | https://developer.flutterwave.com/reference/chargebacks_list |
-| v4 | POST | /chargebacks | Create chargeback case | https://developer.flutterwave.com/reference/chargebacks_post |
-| v4 | GET | /chargebacks/{id} | Retrieve chargeback | https://developer.flutterwave.com/reference/chargebacks_get_by_id |
-| v4 | PUT | /chargebacks/{id} | Update chargeback | https://developer.flutterwave.com/reference/chargeback_put |
-
-## Country / Rail Matrix
-
-| Market | Rail | Integration Notes |
-| --- | --- | --- |
-| All | Card disputes | Most common dispute source. |
-| All | Evidence SLA windows | Track deadlines per case stage. |
-| All | Case timeline model | Store every status transition. |
+| v3 | GET | `/chargebacks` | List chargebacks | https://developer.flutterwave.com/docs/transactions/chargebacks.md |
+| v3 | GET | `/chargebacks/{id}` | Retrieve specific chargeback | https://developer.flutterwave.com/reference/chargebacks_get |
+| v3 | PUT | `/chargebacks/{id}` | Accept or decline dispute | https://developer.flutterwave.com/reference/chargebacks_put |
+| v4 | GET | `/chargebacks` | v4 dispute query | https://developer.flutterwave.com/reference/chargebacks_list |
 
 ## Usage Example
 
 ```ts
-export async function runChargebacksDisputesExample() {
-  return flwRequest<unknown>("v4", "/chargebacks", {
-    method: "GET",
-  });
+import { FlutterwaveChargebackService } from "./flutterwave-chargebacks-disputes";
+
+export async function reviewPendingDisputes() {
+  const service = new FlutterwaveChargebackService();
+  const pending = await service.listChargebacks("pending");
+
+  for (const dispute of pending) {
+    console.log(`Dispute #${dispute.id} on Tx #${dispute.transaction_id}. Due by: ${dispute.due_date}`);
+  }
+
+  return pending;
 }
 ```
 
 ## Reliability Checklist
 
-- Re-verify successful payment state server-side before fulfillment.
-- Store provider ids, internal ids, tx_ref, and event ids for reconciliation.
-- Keep webhook consumers idempotent and return HTTP 200 quickly.
-- Separate version-specific request/response types to avoid schema mixups.
-
-## v4 Delta Note
-
-v4 is resource-centric in the public reference. Keep route maps and payload types versioned in code so agent-generated integrations remain accurate.
-
+- Note the `due_date` timestamp on chargebacks; failing to respond before the due date results in automatic loss of funds.
+- Maintain proof of fulfillment (tracking numbers, signed courier receipts, IP logs) for evidence submission.
+- Listen for `chargeback.created` webhooks to trigger immediate internal compliance reviews.

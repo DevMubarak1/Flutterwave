@@ -1,109 +1,139 @@
 ---
 name: flutterwave-payment-plans
-description: Support plan-driven recurring collections with subscription state controls.
+description: Create recurring payment plans with customizable billing intervals (daily, weekly, monthly, yearly) and attach them to customer checkout sessions.
 ---
 
 # flutterwave-payment-plans
 
 ## Purpose
 
-Support plan-driven recurring collections with subscription state controls.
+Define recurring subscription plans. When attached to checkout sessions (`payment_plan` parameter), Flutterwave automatically rebills the customer on the defined interval (daily, weekly, monthly, quarterly, yearly) without requiring manual recurring charge requests.
 
 ## Implementation Pattern (TypeScript)
 
 ```ts
-const FLW_V3_BASE_URL = process.env.FLW_V3_BASE_URL ?? "https://api.flutterwave.com/v3";
-const FLW_V4_BASE_URL = process.env.FLW_V4_BASE_URL ?? "https://developersandbox-api.flutterwave.com";
-const FLW_SECRET_KEY = process.env.FLW_SECRET_KEY;
+export type BillingInterval = "daily" | "weekly" | "monthly" | "quarterly" | "yearly";
 
-type FlwResponse<T> = {
-  status: "success" | "error";
-  message: string;
-  data: T;
-};
+export interface CreatePaymentPlanOptions {
+  name: string;
+  amount: number;
+  interval: BillingInterval;
+  duration?: number; // Number of billing cycles (0 or omitted for indefinite)
+  currency?: string; // default "NGN"
+}
 
-class FlutterwaveApiError extends Error {
+export interface PaymentPlanRecord {
+  id: number;
+  name: string;
+  amount: number;
+  interval: BillingInterval;
+  duration: number;
+  status: "active" | "cancelled";
+  currency: string;
+  plan_token: string;
+  created_at: string;
+}
+
+export class FlutterwavePaymentPlanService {
   constructor(
-    message: string,
-    public readonly statusCode: number,
-    public readonly payload?: unknown,
+    private readonly secretKey: string = process.env.FLW_SECRET_KEY!,
+    private readonly baseUrl: string = "https://api.flutterwave.com/v3",
   ) {
-    super(message);
-    this.name = "FlutterwaveApiError";
-  }
-}
-
-function getBaseUrl(version: "v3" | "v4") {
-  return version === "v3" ? FLW_V3_BASE_URL : FLW_V4_BASE_URL;
-}
-
-async function flwRequest<T>(
-  version: "v3" | "v4",
-  path: string,
-  init: RequestInit = {},
-): Promise<FlwResponse<T>> {
-  if (!FLW_SECRET_KEY) {
-    throw new Error("Missing FLW_SECRET_KEY");
+    if (!this.secretKey) {
+      throw new Error("Missing FLW_SECRET_KEY");
+    }
   }
 
-  const response = await fetch(`${getBaseUrl(version)}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${FLW_SECRET_KEY}`,
-      ...(init.headers ?? {}),
-    },
-  });
+  /**
+   * Creates a new recurring subscription plan.
+   */
+  async createPlan(options: CreatePaymentPlanOptions): Promise<PaymentPlanRecord> {
+    const res = await fetch(`${this.baseUrl}/payment-plans`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        name: options.name,
+        amount: options.amount.toString(),
+        interval: options.interval,
+        duration: options.duration ?? 0,
+        currency: options.currency ?? "NGN",
+      }),
+    });
 
-  const body = (await response.json()) as FlwResponse<T>;
+    const body = await res.json();
+    if (!res.ok || body.status !== "success") {
+      throw new Error(`Failed to create payment plan: ${body.message}`);
+    }
 
-  if (!response.ok || body.status === "error") {
-    throw new FlutterwaveApiError(
-      body.message || "Flutterwave API request failed",
-      response.status,
-      body,
-    );
+    return body.data;
   }
 
-  return body;
+  /**
+   * Cancels an active payment plan.
+   */
+  async cancelPlan(planId: number | string) {
+    const res = await fetch(`${this.baseUrl}/payment-plans/${planId}/cancel`, {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    return res.json();
+  }
 }
 ```
 
 ## Endpoint Operations and References
 
-| Version | Method | Route / Operation | Use Case | Reference |
+| Version | Method | Route / Operation | Description | Reference |
 | --- | --- | --- | --- | --- |
-| v3 | POST | /payment-plans | Create payment plan | https://developer.flutterwave.com/docs/integration-journey |
-| v3 | POST | /subscriptions/{id}/cancel | Cancel subscription | https://developer.flutterwave.com/docs/integration-journey |
-| v4 | POST | /charges | Run recurring attempt | https://developer.flutterwave.com/reference/charges_post |
-| v4 | GET | /customers | Resolve subscriber identity | https://developer.flutterwave.com/reference/customers_list |
+| v3 | POST | `/payment-plans` | Create subscription plan | https://developer.flutterwave.com/docs/collecting-payments/payment-plans.md |
+| v3 | GET | `/payment-plans` | List active payment plans | https://developer.flutterwave.com/reference/payment_plans_list |
+| v3 | GET | `/payment-plans/{id}` | Inspect specific plan | https://developer.flutterwave.com/reference/payment_plans_get |
+| v3 | PUT | `/payment-plans/{id}/cancel` | Cancel plan | https://developer.flutterwave.com/reference/payment_plans_cancel |
 
-## Country / Rail Matrix
+## Attaching Plan to Standard Checkout
 
-| Market | Rail | Integration Notes |
-| --- | --- | --- |
-| NG | Card recurring | Most common recurring rail. |
-| KE | MoMo + card backup | Fallback on failed mobile money debit. |
-| All | Retry policy by market | Tune retry cadence per country rules. |
+To subscribe a customer upon checkout, pass `payment_plan: plan.id` in `POST /payments`:
+
+```json
+{
+  "tx_ref": "SUB-ORD-9182",
+  "amount": "15000",
+  "currency": "NGN",
+  "payment_plan": 12048,
+  "redirect_url": "https://myapp.com/billing/callback",
+  "customer": {
+    "email": "subscriber@example.com"
+  }
+}
+```
 
 ## Usage Example
 
 ```ts
-export async function runPaymentPlansExample() {
-  return flwRequest<unknown>("v4", "/charges", {
-    method: "GET",
+import { FlutterwavePaymentPlanService } from "./flutterwave-payment-plans";
+
+export async function createSaaSPlan() {
+  const service = new FlutterwavePaymentPlanService();
+  const plan = await service.createPlan({
+    name: "Enterprise Cloud Monthly",
+    amount: 50000,
+    interval: "monthly",
+    currency: "NGN",
   });
+
+  console.log(`Plan ID created: ${plan.id}`);
+  return plan;
 }
 ```
 
 ## Reliability Checklist
 
-- Re-verify successful payment state server-side before fulfillment.
-- Store provider ids, internal ids, tx_ref, and event ids for reconciliation.
-- Keep webhook consumers idempotent and return HTTP 200 quickly.
-- Separate version-specific request/response types to avoid schema mixups.
-
-## v4 Delta Note
-
-v4 is resource-centric in the public reference. Keep route maps and payload types versioned in code so agent-generated integrations remain accurate.
-
+- Listen for the `subscription.cancelled` webhook event to revoke customer privileges when subscriptions are terminated.
+- Test intervals in sandbox to verify recurring webhook triggers.

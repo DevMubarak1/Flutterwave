@@ -1,109 +1,111 @@
 ---
 name: flutterwave-mobile-money
-description: Run mobile money collections with operator-aware routing and delayed status handling.
+description: Charge mobile money wallets across Africa including Kenya M-Pesa STK push, Ghana MTN/Telecel, Rwanda, Uganda, and Francophone Africa.
 ---
 
 # flutterwave-mobile-money
 
 ## Purpose
 
-Run mobile money collections with operator-aware routing and delayed status handling.
+Initiate mobile money wallet payments across Kenya, Ghana, Uganda, Rwanda, Zambia, and Francophone West/Central Africa with STK push prompts, network voucher validation, and webhook settlement.
 
 ## Implementation Pattern (TypeScript)
 
 ```ts
-const FLW_V3_BASE_URL = process.env.FLW_V3_BASE_URL ?? "https://api.flutterwave.com/v3";
-const FLW_V4_BASE_URL = process.env.FLW_V4_BASE_URL ?? "https://developersandbox-api.flutterwave.com";
-const FLW_SECRET_KEY = process.env.FLW_SECRET_KEY;
+export type MobileMoneyChannel =
+  | "mpesa"
+  | "mobile_money_ghana"
+  | "mobile_money_rwanda"
+  | "mobile_money_uganda"
+  | "mobile_money_franco";
 
-type FlwResponse<T> = {
-  status: "success" | "error";
-  message: string;
-  data: T;
-};
+export interface MobileMoneyChargeOptions {
+  channel: MobileMoneyChannel;
+  amount: number;
+  currency: "KES" | "GHS" | "UGX" | "RWF" | "XOF" | "XAF" | string;
+  phoneNumber: string;
+  email: string;
+  txRef: string;
+  network?: "MTN" | "VODAFONE" | "TIGO" | "AIRTEL" | "ORANGE" | string;
+  voucher?: string; // Required for Vodafone / Telecel Ghana
+}
 
-class FlutterwaveApiError extends Error {
+export class FlutterwaveMobileMoneyService {
   constructor(
-    message: string,
-    public readonly statusCode: number,
-    public readonly payload?: unknown,
+    private readonly secretKey: string = process.env.FLW_SECRET_KEY!,
+    private readonly baseUrl: string = "https://api.flutterwave.com/v3",
   ) {
-    super(message);
-    this.name = "FlutterwaveApiError";
-  }
-}
-
-function getBaseUrl(version: "v3" | "v4") {
-  return version === "v3" ? FLW_V3_BASE_URL : FLW_V4_BASE_URL;
-}
-
-async function flwRequest<T>(
-  version: "v3" | "v4",
-  path: string,
-  init: RequestInit = {},
-): Promise<FlwResponse<T>> {
-  if (!FLW_SECRET_KEY) {
-    throw new Error("Missing FLW_SECRET_KEY");
+    if (!this.secretKey) {
+      throw new Error("Missing FLW_SECRET_KEY");
+    }
   }
 
-  const response = await fetch(`${getBaseUrl(version)}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${FLW_SECRET_KEY}`,
-      ...(init.headers ?? {}),
-    },
-  });
+  /**
+   * Initiates mobile money push charge.
+   */
+  async chargeMobileMoney(options: MobileMoneyChargeOptions) {
+    const res = await fetch(`${this.baseUrl}/charges?type=${options.channel}`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        amount: options.amount.toString(),
+        currency: options.currency,
+        phone_number: options.phoneNumber,
+        email: options.email,
+        tx_ref: options.txRef,
+        network: options.network,
+        voucher: options.voucher,
+      }),
+    });
 
-  const body = (await response.json()) as FlwResponse<T>;
+    const body = await res.json();
+    if (!res.ok || body.status !== "success") {
+      throw new Error(`Mobile money charge failed: ${body.message}`);
+    }
 
-  if (!response.ok || body.status === "error") {
-    throw new FlutterwaveApiError(
-      body.message || "Flutterwave API request failed",
-      response.status,
-      body,
-    );
+    return body;
   }
-
-  return body;
 }
 ```
 
 ## Endpoint Operations and References
 
-| Version | Method | Route / Operation | Use Case | Reference |
+| Rail / Country | Type Query | Currency | Action | Reference |
 | --- | --- | --- | --- | --- |
-| v3 | POST | /charges?type=mobile_money | Initiate mobile money charge | https://developer.flutterwave.com/docs/mobile-money |
-| v3 | GET | /transactions/{id}/verify | Verify completion | https://developer.flutterwave.com/docs/getting-started |
-| v4 | GET | /mobile-networks | Get supported operators | https://developer.flutterwave.com/reference/mobile_networks_get |
-| v4 | POST | /charges | Create mobile money charge | https://developer.flutterwave.com/reference/charges_post |
-
-## Country / Rail Matrix
-
-| Market | Rail | Integration Notes |
-| --- | --- | --- |
-| KE | M-Pesa | Primary rail for many consumer use cases. |
-| GH | MTN/Vodafone | Select operator per customer phone prefix. |
-| UG/RW/TZ/ZM | Airtel/MTN variants | Handle delayed completion with webhook + poll. |
+| Kenya (M-Pesa) | `type=mpesa` | `KES` | Triggers STK Push prompt on user phone | https://developer.flutterwave.com/docs/collecting-payments/m-pesa.md |
+| Ghana | `type=mobile_money_ghana` | `GHS` | Charges MTN, Telecel, or AirtelTigo | https://developer.flutterwave.com/docs/collecting-payments/ghana-mobile-money.md |
+| Uganda | `type=mobile_money_uganda` | `UGX` | Prompts MTN or Airtel Uganda wallet | https://developer.flutterwave.com/docs/collecting-payments/uganda-mobile-money.md |
+| Rwanda | `type=mobile_money_rwanda` | `RWF` | Prompts MTN or Airtel Rwanda wallet | https://developer.flutterwave.com/docs/collecting-payments/rwanda-mobile-money.md |
+| Francophone Africa | `type=mobile_money_franco` | `XOF`/`XAF` | Charges Orange, MTN, Wave, Moov | https://developer.flutterwave.com/docs/collecting-payments/franco-mobile-money.md |
 
 ## Usage Example
 
 ```ts
-export async function runMobileMoneyExample() {
-  return flwRequest<unknown>("v4", "/charges", {
-    method: "GET",
+import { FlutterwaveMobileMoneyService } from "./flutterwave-mobile-money";
+
+export async function runMpesaPushDemo() {
+  const service = new FlutterwaveMobileMoneyService();
+
+  // Initiates M-Pesa STK Push in Kenya
+  const result = await service.chargeMobileMoney({
+    channel: "mpesa",
+    amount: 1500,
+    currency: "KES",
+    phoneNumber: "254712345678",
+    email: "customer@example.ke",
+    txRef: `MPESA-${Date.now()}`,
   });
+
+  console.log("STK push initiated:", result.data);
+  return result;
 }
 ```
 
 ## Reliability Checklist
 
-- Re-verify successful payment state server-side before fulfillment.
-- Store provider ids, internal ids, tx_ref, and event ids for reconciliation.
-- Keep webhook consumers idempotent and return HTTP 200 quickly.
-- Separate version-specific request/response types to avoid schema mixups.
-
-## v4 Delta Note
-
-v4 is resource-centric in the public reference. Keep route maps and payload types versioned in code so agent-generated integrations remain accurate.
-
+- Format phone numbers consistently: Kenya numbers should be formatted as `2547XXXXXXXX`.
+- For Vodafone/Telecel Ghana, instruct customers to generate a voucher code (`*110#`) before submitting the charge.
+- Rely on webhook notifications to confirm payment arrival; mobile money push approvals can take up to 45 seconds for user confirmation.

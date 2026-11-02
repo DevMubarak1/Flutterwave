@@ -1,108 +1,163 @@
 ---
 name: flutterwave-webhooks
-description: Implement secure event ingestion with signature verification, idempotency, and async-safe processing.
+description: Ingest Flutterwave webhook events safely with verif-hash validation, constant-time comparison, idempotency guards, and server-side re-verification.
 ---
 
 # flutterwave-webhooks
 
 ## Purpose
 
-Implement secure event ingestion with signature verification, idempotency, and async-safe processing.
+Implement secure webhook ingestion for Flutterwave events. Flutterwave passes a custom dashboard secret hash in the `verif-hash` request header. This skill provides timing-safe verification, event dispatching, idempotency checks, and mandatory server-side confirmation before granting value.
 
-## Implementation Pattern (TypeScript)
+## Implementation Pattern (TypeScript / Next.js & Node)
 
 ```ts
-const FLW_V3_BASE_URL = process.env.FLW_V3_BASE_URL ?? "https://api.flutterwave.com/v3";
-const FLW_V4_BASE_URL = process.env.FLW_V4_BASE_URL ?? "https://developersandbox-api.flutterwave.com";
-const FLW_SECRET_KEY = process.env.FLW_SECRET_KEY;
+import crypto from "node:crypto";
 
-type FlwResponse<T> = {
-  status: "success" | "error";
-  message: string;
-  data: T;
-};
-
-class FlutterwaveApiError extends Error {
-  constructor(
-    message: string,
-    public readonly statusCode: number,
-    public readonly payload?: unknown,
-  ) {
-    super(message);
-    this.name = "FlutterwaveApiError";
-  }
+export interface FlutterwaveWebhookPayload<T = Record<string, unknown>> {
+  event: "charge.completed" | "transfer.completed" | string;
+  data: {
+    id: number | string;
+    tx_ref?: string;
+    reference?: string;
+    flw_ref?: string;
+    amount: number;
+    currency: string;
+    status: "successful" | "failed" | string;
+    customer?: {
+      id: number;
+      email: string;
+      name?: string;
+      phone_number?: string;
+    };
+    [key: string]: unknown;
+  } & T;
+  "event.type"?: string;
 }
 
-function getBaseUrl(version: "v3" | "v4") {
-  return version === "v3" ? FLW_V3_BASE_URL : FLW_V4_BASE_URL;
-}
-
-async function flwRequest<T>(
-  version: "v3" | "v4",
-  path: string,
-  init: RequestInit = {},
-): Promise<FlwResponse<T>> {
-  if (!FLW_SECRET_KEY) {
-    throw new Error("Missing FLW_SECRET_KEY");
+/**
+ * Validates Flutterwave webhook secret hash using timing-safe comparison.
+ */
+export function verifyFlutterwaveWebhookSignature(
+  headerHash: string | null | undefined,
+  expectedSecretHash: string,
+): boolean {
+  if (!headerHash || !expectedSecretHash) {
+    return false;
   }
 
-  const response = await fetch(`${getBaseUrl(version)}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${FLW_SECRET_KEY}`,
-      ...(init.headers ?? {}),
-    },
+  const headerBuffer = Buffer.from(headerHash, "utf8");
+  const expectedBuffer = Buffer.from(expectedSecretHash, "utf8");
+
+  if (headerBuffer.length !== expectedBuffer.length) {
+    return false;
+  }
+
+  return crypto.timingSafeEqual(headerBuffer, expectedBuffer);
+}
+
+/**
+ * Example webhook handler pattern for Next.js App Router (app/api/webhooks/flutterwave/route.ts).
+ */
+export async function POST(req: Request) {
+  const secretHash = process.env.FLW_WEBHOOK_HASH;
+  if (!secretHash) {
+    console.error("FLW_WEBHOOK_HASH is not configured on server");
+    return new Response("Webhook hash unconfigured", { status: 500 });
+  }
+
+  const incomingHash = req.headers.get("verif-hash");
+  if (!verifyFlutterwaveWebhookSignature(incomingHash, secretHash)) {
+    return new Response("Unauthorized webhook", { status: 401 });
+  }
+
+  const payload = (await req.json()) as FlutterwaveWebhookPayload;
+
+  // Acknowledge receipt within Flutterwave's 60-second SLA immediately
+  // Trigger background verification & processing
+  queueMicrotask(async () => {
+    try {
+      await processWebhookEvent(payload);
+    } catch (err) {
+      console.error("Error processing webhook asynchronously:", err);
+    }
   });
 
-  const body = (await response.json()) as FlwResponse<T>;
+  return new Response(JSON.stringify({ status: "success" }), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
 
-  if (!response.ok || body.status === "error") {
-    throw new FlutterwaveApiError(
-      body.message || "Flutterwave API request failed",
-      response.status,
-      body,
+/**
+ * Asynchronous worker that enforces idempotency and double-checks status with the API.
+ */
+async function processWebhookEvent(payload: FlutterwaveWebhookPayload) {
+  const { event, data } = payload;
+  const transactionId = data.id;
+  const expectedTxRef = data.tx_ref || data.reference;
+
+  if (event === "charge.completed" && data.status === "successful") {
+    // 1. Check idempotency store to prevent duplicate credits
+    const alreadyProcessed = await isTransactionHandled(transactionId);
+    if (alreadyProcessed) {
+      return;
+    }
+
+    // 2. CRITICAL: Re-verify transaction with Flutterwave API before fulfillment
+    const verification = await fetch(
+      `https://api.flutterwave.com/v3/transactions/${transactionId}/verify`,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.FLW_SECRET_KEY}`,
+          "Content-Type": "application/json",
+        },
+      },
     );
-  }
 
-  return body;
+    const verifiedBody = await verification.json();
+    if (
+      !verification.ok ||
+      verifiedBody.data.status !== "successful" ||
+      verifiedBody.data.tx_ref !== expectedTxRef
+    ) {
+      console.warn("Webhook spoof or mismatch detected during re-verification:", verifiedBody);
+      return;
+    }
+
+    // 3. Mark processed and credit customer
+    await markTransactionHandled(transactionId, verifiedBody.data);
+  }
+}
+
+async function isTransactionHandled(_id: string | number): Promise<boolean> {
+  // Replace with DB query: e.g. prisma.transaction.findUnique({ where: { flutterwaveId: String(_id) } })
+  return false;
+}
+
+async function markTransactionHandled(_id: string | number, _data: unknown): Promise<void> {
+  // Replace with DB upsert/credit logic
 }
 ```
 
 ## Endpoint Operations and References
 
-| Version | Method | Route / Operation | Use Case | Reference |
+| Event Type | Direction | Payload Header | Key Action | Reference |
 | --- | --- | --- | --- | --- |
-| v3 | POST | Webhook callback | Receive events | https://developer.flutterwave.com/docs/webhooks |
-| v4 | DOC | HMAC-SHA256 signature | Verify flutterwave-signature header | https://developer.flutterwave.com/docs/webhooks#verifying-webhook-signatures |
-| v4 | GET | /charges/{id} | Re-verify critical fields | https://developer.flutterwave.com/reference/charges_get |
+| `charge.completed` | Inbound | `verif-hash` | Payment successful or failed notification | https://developer.flutterwave.com/docs/events/webhooks.md |
+| `transfer.completed` | Inbound | `verif-hash` | Payout terminal status update | https://developer.flutterwave.com/docs/transfers/transfers.md |
+| `GET /transactions/{id}/verify` | Outbound | `Authorization: Bearer <key>` | Server-side verification before value grant | https://developer.flutterwave.com/docs/transactions/verify.md |
+| `GET /charges/{id}` (v4) | Outbound | `Authorization: Bearer <token>` | Next-gen charge state confirmation | https://developer.flutterwave.com/v4.0.0/llms.txt |
 
-## Country / Rail Matrix
+## Common Webhook Events
 
-| Market | Rail | Integration Notes |
-| --- | --- | --- |
-| All | Webhook + Poll fallback | Needed for async rails and retry safety. |
-| All | Idempotent consumer | Deduplicate by webhook id/event status. |
-| All | 60s response SLA | Respond 200 quickly, defer heavy work. |
-
-## Usage Example
-
-```ts
-export async function runFlutterwaveWebhooksExample() {
-  return flwRequest<unknown>("v4", "/charges/{id}", {
-    method: "GET",
-  });
-}
-```
+- `charge.completed`: Triggered on card, bank transfer, USSD, or mobile money payment completion.
+- `transfer.completed`: Triggered when an outbound transfer succeeds, fails, or is reversed.
+- `chargeback.created`: Triggered when a customer opens a dispute against a transaction.
 
 ## Reliability Checklist
 
-- Re-verify successful payment state server-side before fulfillment.
-- Store provider ids, internal ids, tx_ref, and event ids for reconciliation.
-- Keep webhook consumers idempotent and return HTTP 200 quickly.
-- Separate version-specific request/response types to avoid schema mixups.
-
-## v4 Delta Note
-
-v4 is resource-centric in the public reference. Keep route maps and payload types versioned in code so agent-generated integrations remain accurate.
-
+- Compare `verif-hash` using constant-time string comparison (`crypto.timingSafeEqual`) to avoid timing side channels.
+- Return HTTP 200 within 60 seconds. Do not block the HTTP response with external email, SMS, or slow DB transactions.
+- Always re-query the transaction by ID using the official verify endpoint (`/transactions/{id}/verify`) to validate `status === "successful"`, `currency`, and `amount`.
+- Ensure webhook handlers are completely idempotent; Flutterwave retries webhooks automatically on network timeouts or non-200 responses.

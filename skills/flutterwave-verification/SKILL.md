@@ -1,109 +1,109 @@
 ---
 name: flutterwave-verification
-description: Run account and identity checks before payment or payout actions.
+description: Verify bank account holder names, validate Bank Verification Numbers (BVN), and inspect card BIN issuer metadata.
 ---
 
 # flutterwave-verification
 
 ## Purpose
 
-Run account and identity checks before payment or payout actions.
+Perform KYC and account validation before executing payouts or account creation. Resolves Nigerian bank account numbers to verify the account holder's registered legal name, validates BVN data, and checks card BIN details.
 
 ## Implementation Pattern (TypeScript)
 
 ```ts
-const FLW_V3_BASE_URL = process.env.FLW_V3_BASE_URL ?? "https://api.flutterwave.com/v3";
-const FLW_V4_BASE_URL = process.env.FLW_V4_BASE_URL ?? "https://developersandbox-api.flutterwave.com";
-const FLW_SECRET_KEY = process.env.FLW_SECRET_KEY;
+export interface ResolvedAccountDetails {
+  account_number: string;
+  account_name: string;
+}
 
-type FlwResponse<T> = {
-  status: "success" | "error";
-  message: string;
-  data: T;
-};
+export interface CardBinDetails {
+  issuing_country: string;
+  bin: string;
+  card_type: string;
+  issuer_info: string;
+}
 
-class FlutterwaveApiError extends Error {
+export class FlutterwaveVerificationService {
   constructor(
-    message: string,
-    public readonly statusCode: number,
-    public readonly payload?: unknown,
+    private readonly secretKey: string = process.env.FLW_SECRET_KEY!,
+    private readonly baseUrl: string = "https://api.flutterwave.com/v3",
   ) {
-    super(message);
-    this.name = "FlutterwaveApiError";
-  }
-}
-
-function getBaseUrl(version: "v3" | "v4") {
-  return version === "v3" ? FLW_V3_BASE_URL : FLW_V4_BASE_URL;
-}
-
-async function flwRequest<T>(
-  version: "v3" | "v4",
-  path: string,
-  init: RequestInit = {},
-): Promise<FlwResponse<T>> {
-  if (!FLW_SECRET_KEY) {
-    throw new Error("Missing FLW_SECRET_KEY");
+    if (!this.secretKey) {
+      throw new Error("Missing FLW_SECRET_KEY");
+    }
   }
 
-  const response = await fetch(`${getBaseUrl(version)}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${FLW_SECRET_KEY}`,
-      ...(init.headers ?? {}),
-    },
-  });
+  /**
+   * Resolves a bank account number to obtain the official account holder name.
+   */
+  async resolveBankAccount(accountNumber: string, bankCode: string): Promise<ResolvedAccountDetails> {
+    const res = await fetch(`${this.baseUrl}/accounts/resolve`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        account_number: accountNumber,
+        account_bank: bankCode,
+      }),
+    });
 
-  const body = (await response.json()) as FlwResponse<T>;
+    const body = await res.json();
+    if (!res.ok || body.status !== "success") {
+      throw new Error(`Account resolution failed: ${body.message}`);
+    }
 
-  if (!response.ok || body.status === "error") {
-    throw new FlutterwaveApiError(
-      body.message || "Flutterwave API request failed",
-      response.status,
-      body,
-    );
+    return body.data;
   }
 
-  return body;
+  /**
+   * Resolves card BIN metadata (issuer, country, card type).
+   */
+  async resolveCardBin(bin: string): Promise<CardBinDetails> {
+    const res = await fetch(`${this.baseUrl}/card-bins/${bin}`, {
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    const body = await res.json();
+    if (!res.ok || body.status !== "success") {
+      throw new Error(`Card BIN resolution failed: ${body.message}`);
+    }
+
+    return body.data;
+  }
 }
 ```
 
 ## Endpoint Operations and References
 
-| Version | Method | Route / Operation | Use Case | Reference |
+| Version | Method | Route / Operation | Description | Reference |
 | --- | --- | --- | --- | --- |
-| v3 | GET | /accounts/resolve | Resolve bank account | https://developer.flutterwave.com/docs/getting-started |
-| v4 | POST | /bank-account-resolve | Resolve bank account details | https://developer.flutterwave.com/reference/bank_account_resolve_post |
-| v4 | POST | /wallet-account-resolve | Resolve wallet account | https://developer.flutterwave.com/reference/wallet_account_resolve_post |
-| v4 | GET | /banks | Retrieve bank list | https://developer.flutterwave.com/reference/banks_get |
-
-## Country / Rail Matrix
-
-| Market | Rail | Integration Notes |
-| --- | --- | --- |
-| NG | Account resolution | Mandatory before payouts. |
-| KE/GH | Wallet lookup | Useful for MoMo beneficiary validation. |
-| All | Pre-flight checks | Reduce payment and transfer failure rates. |
+| v3 | POST | `/accounts/resolve` | Resolve Nigerian bank account name | https://developer.flutterwave.com/docs/transactions/account-verification.md |
+| v3 | POST | `/bvn/match` | Verify BVN matches user KYC name/DOB | https://developer.flutterwave.com/reference/bvn_match |
+| v3 | GET | `/card-bins/{bin}` | Look up card issuer and brand | https://developer.flutterwave.com/reference/card_bins_get |
+| v4 | POST | `/accounts/lookup` | Next-gen account resolution | https://developer.flutterwave.com/reference/accounts_lookup |
 
 ## Usage Example
 
 ```ts
-export async function runVerificationExample() {
-  return flwRequest<unknown>("v4", "/bank-account-resolve", {
-    method: "GET",
-  });
+import { FlutterwaveVerificationService } from "./flutterwave-verification";
+
+export async function verifyRecipient() {
+  const service = new FlutterwaveVerificationService();
+  const account = await service.resolveBankAccount("0690000031", "044"); // Access Bank
+
+  console.log(`Verified Name: ${account.account_name}`);
+  return account;
 }
 ```
 
 ## Reliability Checklist
 
-- Re-verify successful payment state server-side before fulfillment.
-- Store provider ids, internal ids, tx_ref, and event ids for reconciliation.
-- Keep webhook consumers idempotent and return HTTP 200 quickly.
-- Separate version-specific request/response types to avoid schema mixups.
-
-## v4 Delta Note
-
-v4 is resource-centric in the public reference. Keep route maps and payload types versioned in code so agent-generated integrations remain accurate.
-
+- Always call `/accounts/resolve` before initiating high-value transfers or storing new beneficiaries.
+- Present the resolved account name to the user for confirmation on frontend review screens.
+- Card BIN lookups provide valuable fraud prevention signals (e.g. comparing card issuing country with user IP/billing country).

@@ -1,7 +1,8 @@
 {
   "name": "flutterwave-skills",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "skills": [
+    "flutterwave",
     "flutterwave-setup",
     "flutterwave-webhooks",
     "flutterwave-testing",

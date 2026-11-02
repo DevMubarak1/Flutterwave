@@ -1,60 +1,59 @@
 # Release Checklist for DevMubarak1/Flutterwave
 
-This checklist is tailored to this repository and release flow.
+This checklist ensures all skill markdown files, schema references, and documentation stay in sync with the current Flutterwave developer platform specifications (v3.0.0 and v4.0.0 Public Beta).
 
-## 1. Repository and Metadata
+---
 
-- Confirm repository is public at https://github.com/DevMubarak1/Flutterwave.
-- Confirm package metadata in package.json:
-  - name: flutterwave-skills
-  - repository.url: git+https://github.com/DevMubarak1/Flutterwave.git
-  - bugs.url: https://github.com/DevMubarak1/Flutterwave/issues
-  - homepage: https://github.com/DevMubarak1/Flutterwave#readme
-- Confirm all skill markdown files are present in skills/*/SKILL.md.
+## 1. Repository & Metadata Integrity
 
-## 2. Local Validation
+- [ ] Confirm repository is public at `https://github.com/DevMubarak1/Flutterwave`.
+- [ ] Confirm package metadata in `package.json`:
+  - `name`: `flutterwave-skills`
+  - `version`: Bumped appropriately (e.g., `0.2.0`)
+  - `repository.url`: `git+https://github.com/DevMubarak1/Flutterwave.git`
+- [ ] Verify that `skills/manifest.json` lists all 23 active skills.
+- [ ] Verify all skill files exist at `skills/[skill-name]/SKILL.md` with valid YAML frontmatter (`name`, `description`).
 
-- Run `npm run check`.
-- Confirm no markdown rendering issues in README and docs.
-- Confirm manifest list in skills/manifest.json matches actual skill folders.
+---
 
-## 3. skills.sh Registration
+## 2. API Specification & Live Standards Alignment
 
-- Sign in at skills.sh.
-- Connect GitHub account.
-- Register repository: DevMubarak1/Flutterwave.
-- Confirm skills index detects skills/*/SKILL.md.
-- Test install from a clean project:
-  - `npx skills add DevMubarak1/Flutterwave`
+- [ ] **Dual Versioning:**
+  - Stable v3 routes point to `https://api.flutterwave.com/v3`.
+  - Next-Gen v4 routes point to `https://developersandbox-api.flutterwave.com` (sandbox) and `https://f4bexperience.flutterwave.com/` (live).
+- [ ] **Authentication Consistency:**
+  - v3 examples use `Authorization: Bearer <FLW_SECRET_KEY>`.
+  - v4 examples note OAuth 2.0 OpenID Connect endpoint `https://idp.flutterwave.com/realms/flutterwave/protocol/openid-connect/token` with `client_id` and `client_secret`.
+  - v4 mutations include `X-Trace-Id` (12-255 chars) and `X-Idempotency-Key`.
+- [ ] **Webhook Verification:**
+  - Verified against the official `verif-hash` header comparison with `process.env.FLW_WEBHOOK_HASH` using `crypto.timingSafeEqual`.
+  - Fast HTTP 200 acknowledgment within 60 seconds.
+- [ ] **Machine-Readable AI Documentation:**
+  - Reference links point to `https://developer.flutterwave.com/llms.txt` and `https://developer.flutterwave.com/v4.0.0/llms.txt`.
+  - Explain `.md` URL extension convention for clean markdown retrieval.
 
-### Skills.sh CLI Quick Use
+---
 
-- Browse registry: https://skills.sh/
-- Add by skill name: `npx skills add <skill-name>`
-- Add from GitHub/GitLab repo: `npx skills add owner/repo`
-- List installed skills: `npx skills list`
+## 3. Local Verification
 
-## 4. npm Publishing
+- [ ] Run `npm run check`.
+- [ ] Ensure TypeScript code snippets inside each `SKILL.md` are syntactically valid and contain realistic usage examples.
+- [ ] Confirm no dead links or malformed markdown tables across `docs/` and `skills/`.
 
-- Ensure npm account has publish rights for package name `flutterwave-skills`.
-- Authenticate with npm (`npm login` or `NPM_TOKEN` in environment).
-- Publish with `npm publish --access public`.
-- Tag a release in GitHub matching package version.
+---
 
-### Security Note
+## 4. Skills.sh & Package Registry Deployment
 
-- Never commit `.npmrc` with auth tokens.
-- Rotate npm access tokens if they were exposed in logs or chat history.
-
-## 5. Post-Publish Verification
-
-- Re-run install test:
-  - `npx skills add DevMubarak1/Flutterwave`
-- Verify package metadata on npm and README links.
-- Create a changelog entry for the release.
-
-## 6. Recommended Release Cadence
-
-- Patch: endpoint wording fixes, typo corrections.
-- Minor: new skills, major docs additions, expanded country guidance.
-- Major: broad template/schema changes across all skills.
+- [ ] Test local and remote installation:
+  ```bash
+  npx skills add DevMubarak1/Flutterwave
+  ```
+- [ ] Check installed skills in test environment:
+  ```bash
+  npx skills list
+  ```
+- [ ] Publish release to npm:
+  ```bash
+  npm publish --access public
+  ```
+- [ ] Create GitHub Release matching the release tag (e.g., `v0.2.0`).

@@ -1,110 +1,134 @@
 ---
 name: flutterwave-beneficiaries
-description: Maintain reusable payout recipients and senders for clean transfer orchestration.
+description: Create, store, list, and delete payout beneficiaries for recurring bank and mobile money disbursements.
 ---
 
 # flutterwave-beneficiaries
 
 ## Purpose
 
-Maintain reusable payout recipients and senders for clean transfer orchestration.
+Manage payout beneficiaries for frequent transfers. Storing beneficiaries eliminates repetitive account resolution steps and streamlines automated vendor disbursements and payroll runs.
 
 ## Implementation Pattern (TypeScript)
 
 ```ts
-const FLW_V3_BASE_URL = process.env.FLW_V3_BASE_URL ?? "https://api.flutterwave.com/v3";
-const FLW_V4_BASE_URL = process.env.FLW_V4_BASE_URL ?? "https://developersandbox-api.flutterwave.com";
-const FLW_SECRET_KEY = process.env.FLW_SECRET_KEY;
+export interface CreateBeneficiaryPayload {
+  accountNumber: string;
+  accountBank: string; // 3-digit bank code or mobile operator code
+  beneficiaryName: string;
+  currency?: string;
+}
 
-type FlwResponse<T> = {
-  status: "success" | "error";
-  message: string;
-  data: T;
-};
+export interface BeneficiaryRecord {
+  id: number;
+  account_number: string;
+  account_bank: string;
+  full_name: string;
+  bank_name: string;
+  created_at: string;
+}
 
-class FlutterwaveApiError extends Error {
+export class FlutterwaveBeneficiaryService {
   constructor(
-    message: string,
-    public readonly statusCode: number,
-    public readonly payload?: unknown,
+    private readonly secretKey: string = process.env.FLW_SECRET_KEY!,
+    private readonly baseUrl: string = "https://api.flutterwave.com/v3",
   ) {
-    super(message);
-    this.name = "FlutterwaveApiError";
-  }
-}
-
-function getBaseUrl(version: "v3" | "v4") {
-  return version === "v3" ? FLW_V3_BASE_URL : FLW_V4_BASE_URL;
-}
-
-async function flwRequest<T>(
-  version: "v3" | "v4",
-  path: string,
-  init: RequestInit = {},
-): Promise<FlwResponse<T>> {
-  if (!FLW_SECRET_KEY) {
-    throw new Error("Missing FLW_SECRET_KEY");
+    if (!this.secretKey) {
+      throw new Error("Missing FLW_SECRET_KEY");
+    }
   }
 
-  const response = await fetch(`${getBaseUrl(version)}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${FLW_SECRET_KEY}`,
-      ...(init.headers ?? {}),
-    },
-  });
+  /**
+   * Creates a new payout beneficiary.
+   */
+  async createBeneficiary(payload: CreateBeneficiaryPayload): Promise<BeneficiaryRecord> {
+    const res = await fetch(`${this.baseUrl}/beneficiaries`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        account_number: payload.accountNumber,
+        account_bank: payload.accountBank,
+        beneficiary_name: payload.beneficiaryName,
+        currency: payload.currency ?? "NGN",
+      }),
+    });
 
-  const body = (await response.json()) as FlwResponse<T>;
+    const body = await res.json();
+    if (!res.ok || body.status !== "success") {
+      throw new Error(`Failed to create beneficiary: ${body.message}`);
+    }
 
-  if (!response.ok || body.status === "error") {
-    throw new FlutterwaveApiError(
-      body.message || "Flutterwave API request failed",
-      response.status,
-      body,
-    );
+    return body.data;
   }
 
-  return body;
+  /**
+   * Lists existing beneficiaries.
+   */
+  async listBeneficiaries(page = 1) {
+    const res = await fetch(`${this.baseUrl}/beneficiaries?page=${page}`, {
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    const body = await res.json();
+    if (!res.ok || body.status !== "success") {
+      throw new Error(`Failed to fetch beneficiaries: ${body.message}`);
+    }
+
+    return body.data as BeneficiaryRecord[];
+  }
+
+  /**
+   * Deletes a beneficiary by ID.
+   */
+  async deleteBeneficiary(id: number | string) {
+    const res = await fetch(`${this.baseUrl}/beneficiaries/${id}`, {
+      method: "DELETE",
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    return res.json();
+  }
 }
 ```
 
 ## Endpoint Operations and References
 
-| Version | Method | Route / Operation | Use Case | Reference |
+| Version | Method | Route / Operation | Description | Reference |
 | --- | --- | --- | --- | --- |
-| v3 | POST | /beneficiaries | Create beneficiary | https://developer.flutterwave.com/docs/general-transfer-flow |
-| v4 | GET | /transfers/recipients | List recipients | https://developer.flutterwave.com/reference/transfers_recipients_list |
-| v4 | POST | /transfers/recipients | Create recipient | https://developer.flutterwave.com/reference/transfers_recipients_create |
-| v4 | DELETE | /transfers/recipients/{id} | Delete recipient | https://developer.flutterwave.com/reference/transfers_recipients_delete |
-| v4 | POST | /transfers/senders | Create sender | https://developer.flutterwave.com/reference/transfers_senders_create |
-
-## Country / Rail Matrix
-
-| Market | Rail | Integration Notes |
-| --- | --- | --- |
-| NG | Bank beneficiaries | Validate account ownership first. |
-| KE/GH | MoMo beneficiaries | Store operator + phone metadata. |
-| All | Sender/recipient separation | Required for compliance audits. |
+| v3 | POST | `/beneficiaries` | Create saved payout beneficiary | https://developer.flutterwave.com/docs/transfers/beneficiaries.md |
+| v3 | GET | `/beneficiaries` | List saved beneficiaries | https://developer.flutterwave.com/reference/beneficiaries_list |
+| v3 | DELETE | `/beneficiaries/{id}` | Delete beneficiary | https://developer.flutterwave.com/reference/beneficiaries_delete |
+| v4 | POST | `/transfer-recipients` | Create recipient for v4 transfers | https://developer.flutterwave.com/reference/transfer_recipients_post |
 
 ## Usage Example
 
 ```ts
-export async function runBeneficiariesExample() {
-  return flwRequest<unknown>("v4", "/transfers/recipients", {
-    method: "GET",
+import { FlutterwaveBeneficiaryService } from "./flutterwave-beneficiaries";
+
+export async function addVendorContact() {
+  const service = new FlutterwaveBeneficiaryService();
+  const contact = await service.createBeneficiary({
+    accountNumber: "0690000031",
+    accountBank: "044", // Access Bank
+    beneficiaryName: "Acme Logistics Nigeria Ltd",
+    currency: "NGN",
   });
+
+  console.log(`Beneficiary created with ID: ${contact.id}`);
+  return contact;
 }
 ```
 
 ## Reliability Checklist
 
-- Re-verify successful payment state server-side before fulfillment.
-- Store provider ids, internal ids, tx_ref, and event ids for reconciliation.
-- Keep webhook consumers idempotent and return HTTP 200 quickly.
-- Separate version-specific request/response types to avoid schema mixups.
-
-## v4 Delta Note
-
-v4 is resource-centric in the public reference. Keep route maps and payload types versioned in code so agent-generated integrations remain accurate.
-
+- Validate bank account and bank code using the account resolution API prior to saving beneficiaries.
+- Provide users the ability to manage and delete outdated recipient profiles.

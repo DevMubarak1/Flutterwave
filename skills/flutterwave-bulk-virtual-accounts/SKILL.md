@@ -1,108 +1,113 @@
 ---
 name: flutterwave-bulk-virtual-accounts
-description: Orchestrate batch dedicated-account creation and assignment workflows.
+description: Batch generate dedicated virtual bank accounts for high-volume customer onboarding and fintech platforms.
 ---
 
 # flutterwave-bulk-virtual-accounts
 
 ## Purpose
 
-Orchestrate batch dedicated-account creation and assignment workflows.
+Provision virtual bank accounts in batches. Ideal for enterprise platforms, gig worker payouts, and neobanks onboarding thousands of customers who need dedicated deposit account numbers.
 
 ## Implementation Pattern (TypeScript)
 
 ```ts
-const FLW_V3_BASE_URL = process.env.FLW_V3_BASE_URL ?? "https://api.flutterwave.com/v3";
-const FLW_V4_BASE_URL = process.env.FLW_V4_BASE_URL ?? "https://developersandbox-api.flutterwave.com";
-const FLW_SECRET_KEY = process.env.FLW_SECRET_KEY;
+export interface BulkVirtualAccountOptions {
+  accounts: number; // Number of accounts to generate in batch
+  email: string;
+  isPermanent?: boolean;
+  txRef: string;
+}
 
-type FlwResponse<T> = {
-  status: "success" | "error";
-  message: string;
-  data: T;
-};
+export interface BulkVirtualAccountBatchResponse {
+  batch_id: string;
+  status: "processing" | "completed" | string;
+  total_accounts: number;
+}
 
-class FlutterwaveApiError extends Error {
+export class FlutterwaveBulkVirtualAccountService {
   constructor(
-    message: string,
-    public readonly statusCode: number,
-    public readonly payload?: unknown,
+    private readonly secretKey: string = process.env.FLW_SECRET_KEY!,
+    private readonly baseUrl: string = "https://api.flutterwave.com/v3",
   ) {
-    super(message);
-    this.name = "FlutterwaveApiError";
-  }
-}
-
-function getBaseUrl(version: "v3" | "v4") {
-  return version === "v3" ? FLW_V3_BASE_URL : FLW_V4_BASE_URL;
-}
-
-async function flwRequest<T>(
-  version: "v3" | "v4",
-  path: string,
-  init: RequestInit = {},
-): Promise<FlwResponse<T>> {
-  if (!FLW_SECRET_KEY) {
-    throw new Error("Missing FLW_SECRET_KEY");
+    if (!this.secretKey) {
+      throw new Error("Missing FLW_SECRET_KEY");
+    }
   }
 
-  const response = await fetch(`${getBaseUrl(version)}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${FLW_SECRET_KEY}`,
-      ...(init.headers ?? {}),
-    },
-  });
+  /**
+   * Submits a request to batch generate virtual accounts.
+   */
+  async createBulkAccounts(
+    options: BulkVirtualAccountOptions,
+  ): Promise<BulkVirtualAccountBatchResponse> {
+    const res = await fetch(`${this.baseUrl}/bulk-virtual-account-numbers`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        accounts: options.accounts,
+        email: options.email,
+        is_permanent: options.isPermanent ?? true,
+        tx_ref: options.txRef,
+      }),
+    });
 
-  const body = (await response.json()) as FlwResponse<T>;
+    const body = await res.json();
+    if (!res.ok || body.status !== "success") {
+      throw new Error(`Failed to queue bulk virtual accounts: ${body.message}`);
+    }
 
-  if (!response.ok || body.status === "error") {
-    throw new FlutterwaveApiError(
-      body.message || "Flutterwave API request failed",
-      response.status,
-      body,
-    );
+    return body.data;
   }
 
-  return body;
+  /**
+   * Checks the generation status of a bulk batch.
+   */
+  async getBatchStatus(batchId: string) {
+    const res = await fetch(`${this.baseUrl}/bulk-virtual-account-numbers/${batchId}`, {
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    const body = await res.json();
+    return body.data;
+  }
 }
 ```
 
 ## Endpoint Operations and References
 
-| Version | Method | Route / Operation | Use Case | Reference |
+| Version | Method | Route / Operation | Description | Reference |
 | --- | --- | --- | --- | --- |
-| v3 | POST | /bulk-virtual-account-numbers | Create bulk dedicated accounts | https://developer.flutterwave.com/docs/pay-with-bank-transfer |
-| v4 | POST | /virtual-accounts | Create account (loop/batch job) | https://developer.flutterwave.com/reference/virtual_accounts_post |
-| v4 | GET | /virtual-accounts | Audit batch outcomes | https://developer.flutterwave.com/reference/virtual_accounts_list |
-
-## Country / Rail Matrix
-
-| Market | Rail | Integration Notes |
-| --- | --- | --- |
-| NG | Bulk VA issuance | Common for invoice or wallet products. |
-| KE/GH | Regional rollout | Gate by capability flags before provisioning. |
-| All | Async job control | Track per-record success/failure states. |
+| v3 | POST | `/bulk-virtual-account-numbers` | Queue batch virtual account creation | https://developer.flutterwave.com/docs/virtual-accounts/bulk-virtual-accounts.md |
+| v3 | GET | `/bulk-virtual-account-numbers/{batch_id}` | Query batch generation status | https://developer.flutterwave.com/reference/bulk_virtual_account_numbers_get |
+| v4 | POST | `/virtual-accounts` | v4 virtual account generator | https://developer.flutterwave.com/reference/virtual_accounts_post |
 
 ## Usage Example
 
 ```ts
-export async function runBulkVirtualAccountsExample() {
-  return flwRequest<unknown>("v4", "/virtual-accounts", {
-    method: "GET",
+import { FlutterwaveBulkVirtualAccountService } from "./flutterwave-bulk-virtual-accounts";
+
+export async function queueAccountBatch() {
+  const service = new FlutterwaveBulkVirtualAccountService();
+  const batch = await service.createBulkAccounts({
+    accounts: 100,
+    email: "enterprise-ops@example.com",
+    txRef: `BATCH-${Date.now()}`,
+    isPermanent: true,
   });
+
+  console.log(`Batch ${batch.batch_id} queued for processing`);
+  return batch;
 }
 ```
 
 ## Reliability Checklist
 
-- Re-verify successful payment state server-side before fulfillment.
-- Store provider ids, internal ids, tx_ref, and event ids for reconciliation.
-- Keep webhook consumers idempotent and return HTTP 200 quickly.
-- Separate version-specific request/response types to avoid schema mixups.
-
-## v4 Delta Note
-
-v4 is resource-centric in the public reference. Keep route maps and payload types versioned in code so agent-generated integrations remain accurate.
-
+- Bulk generation executes asynchronously; poll the batch endpoint or rely on webhook notification for large batches.
+- Confirm account limits and quota allocations with your Flutterwave account manager prior to submitting large batch requests.

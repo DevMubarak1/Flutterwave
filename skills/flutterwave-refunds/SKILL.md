@@ -1,109 +1,125 @@
 ---
 name: flutterwave-refunds
-description: Create and monitor full or partial refunds with auditable states.
+description: Issue full or partial refunds for settled transactions, query refund status, and track refund audit trails.
 ---
 
 # flutterwave-refunds
 
 ## Purpose
 
-Create and monitor full or partial refunds with auditable states.
+Issue programmatic refunds to customers for previously charged transactions. Supports full refunds, partial refunds, customer comments, and querying refund status.
 
 ## Implementation Pattern (TypeScript)
 
 ```ts
-const FLW_V3_BASE_URL = process.env.FLW_V3_BASE_URL ?? "https://api.flutterwave.com/v3";
-const FLW_V4_BASE_URL = process.env.FLW_V4_BASE_URL ?? "https://developersandbox-api.flutterwave.com";
-const FLW_SECRET_KEY = process.env.FLW_SECRET_KEY;
+export interface RefundOptions {
+  transactionId: string | number;
+  amount?: number; // Omit for full refund
+  comments?: string;
+}
 
-type FlwResponse<T> = {
-  status: "success" | "error";
-  message: string;
-  data: T;
-};
+export interface RefundDetails {
+  id: number;
+  account_id: number;
+  tx_id: number;
+  flw_ref: string;
+  wallet_id: number;
+  amount_refunded: number;
+  status: "completed" | "pending" | string;
+  destination: string;
+  meta: Record<string, unknown>;
+  created_at: string;
+}
 
-class FlutterwaveApiError extends Error {
+export class FlutterwaveRefundService {
   constructor(
-    message: string,
-    public readonly statusCode: number,
-    public readonly payload?: unknown,
+    private readonly secretKey: string = process.env.FLW_SECRET_KEY!,
+    private readonly baseUrl: string = "https://api.flutterwave.com/v3",
   ) {
-    super(message);
-    this.name = "FlutterwaveApiError";
-  }
-}
-
-function getBaseUrl(version: "v3" | "v4") {
-  return version === "v3" ? FLW_V3_BASE_URL : FLW_V4_BASE_URL;
-}
-
-async function flwRequest<T>(
-  version: "v3" | "v4",
-  path: string,
-  init: RequestInit = {},
-): Promise<FlwResponse<T>> {
-  if (!FLW_SECRET_KEY) {
-    throw new Error("Missing FLW_SECRET_KEY");
+    if (!this.secretKey) {
+      throw new Error("Missing FLW_SECRET_KEY");
+    }
   }
 
-  const response = await fetch(`${getBaseUrl(version)}${path}`, {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${FLW_SECRET_KEY}`,
-      ...(init.headers ?? {}),
-    },
-  });
+  /**
+   * Issues a full or partial refund for a transaction.
+   */
+  async createRefund(options: RefundOptions): Promise<RefundDetails> {
+    const payload: Record<string, unknown> = {};
+    if (options.amount !== undefined) {
+      payload.amount = options.amount.toString();
+    }
+    if (options.comments) {
+      payload.comments = options.comments;
+    }
 
-  const body = (await response.json()) as FlwResponse<T>;
+    const res = await fetch(`${this.baseUrl}/transactions/${options.transactionId}/refund`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
 
-  if (!response.ok || body.status === "error") {
-    throw new FlutterwaveApiError(
-      body.message || "Flutterwave API request failed",
-      response.status,
-      body,
-    );
+    const body = await res.json();
+    if (!res.ok || body.status !== "success") {
+      throw new Error(`Refund failed: ${body.message || res.statusText}`);
+    }
+
+    return body.data;
   }
 
-  return body;
+  /**
+   * Retrieves status of an existing refund.
+   */
+  async getRefund(refundId: string | number): Promise<RefundDetails> {
+    const res = await fetch(`${this.baseUrl}/refunds/${refundId}`, {
+      headers: {
+        Authorization: `Bearer ${this.secretKey}`,
+        "Content-Type": "application/json",
+      },
+    });
+
+    const body = await res.json();
+    if (!res.ok || body.status !== "success") {
+      throw new Error(`Failed to fetch refund details: ${body.message}`);
+    }
+
+    return body.data;
+  }
 }
 ```
 
 ## Endpoint Operations and References
 
-| Version | Method | Route / Operation | Use Case | Reference |
+| Version | Method | Route / Operation | Description | Reference |
 | --- | --- | --- | --- | --- |
-| v3 | POST | /transactions/{id}/refund | Initiate refund | https://developer.flutterwave.com/docs/refunds |
-| v4 | POST | /refunds | Create refund | https://developer.flutterwave.com/reference/refunds_post |
-| v4 | GET | /refunds | List refunds | https://developer.flutterwave.com/reference/refunds_list |
-| v4 | GET | /refunds/{id} | Retrieve refund | https://developer.flutterwave.com/reference/refunds_get |
-
-## Country / Rail Matrix
-
-| Market | Rail | Integration Notes |
-| --- | --- | --- |
-| All | Card refunds | Support partial and full refund cases. |
-| All | Transfer reversal edge cases | Track irreversible outcomes cleanly. |
-| All | Webhook + query confirm | Never mark refund final from one signal. |
+| v3 | POST | `/transactions/{id}/refund` | Initiate refund on transaction | https://developer.flutterwave.com/docs/transactions/refunds.md |
+| v3 | GET | `/refunds/{id}` | Retrieve specific refund details | https://developer.flutterwave.com/reference/refunds_get |
+| v3 | GET | `/refunds` | List all historical refunds | https://developer.flutterwave.com/reference/refunds_list |
+| v4 | POST | `/refunds` | Initiate refund via v4 API | https://developer.flutterwave.com/reference/refunds_post |
 
 ## Usage Example
 
 ```ts
-export async function runRefundsExample() {
-  return flwRequest<unknown>("v4", "/refunds", {
-    method: "GET",
+import { FlutterwaveRefundService } from "./flutterwave-refunds";
+
+export async function processCustomerReturn(txId: number, returnAmount: number) {
+  const service = new FlutterwaveRefundService();
+  const refund = await service.createRefund({
+    transactionId: txId,
+    amount: returnAmount,
+    comments: "Customer returned unworn shoes within 14 days",
   });
+
+  console.log(`Refund initiated with ID ${refund.id}. Status: ${refund.status}`);
+  return refund;
 }
 ```
 
 ## Reliability Checklist
 
-- Re-verify successful payment state server-side before fulfillment.
-- Store provider ids, internal ids, tx_ref, and event ids for reconciliation.
-- Keep webhook consumers idempotent and return HTTP 200 quickly.
-- Separate version-specific request/response types to avoid schema mixups.
-
-## v4 Delta Note
-
-v4 is resource-centric in the public reference. Keep route maps and payload types versioned in code so agent-generated integrations remain accurate.
-
+- Ensure your Flutterwave account has sufficient available balance in the transaction's settlement currency before initiating refunds.
+- Card refunds typically reflect in customer accounts within 3 to 15 business days depending on issuer bank policies.
+- Record `refund.id` and `tx_id` in your local audit logs for bookkeeping.
