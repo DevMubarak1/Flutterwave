@@ -12,24 +12,15 @@ Designed for AI coding agents (**Claude Code**, **Cursor**, **GitHub Copilot**, 
 
 ---
 
-## ⚡ Quick Install
+## ⚡ One-Line Install (All Skills Included)
 
-You can install the **entire 23-skill collection**, the **all-in-one master skill**, or individual focused workflows:
+Install the complete, production-ready Flutterwave capabilities in a single command with zero prompts:
 
 ```bash
-# Option 1: Install the complete 23-skill collection
 npx skills add DevMubarak1/Flutterwave
-
-# Option 2: Install the all-in-one master skill
-npx skills add DevMubarak1/Flutterwave --skill flutterwave
-
-# Option 3: Install modular focused workflows
-npx skills add DevMubarak1/Flutterwave --skill flutterwave-setup
-npx skills add DevMubarak1/Flutterwave --skill flutterwave-standard-checkout
-npx skills add DevMubarak1/Flutterwave --skill flutterwave-webhooks
-npx skills add DevMubarak1/Flutterwave --skill flutterwave-transfers
-npx skills add DevMubarak1/Flutterwave --skill flutterwave-virtual-accounts
 ```
+
+This single command installs the full Flutterwave skillset across checkout, cards, bank transfers, mobile money, payouts, virtual accounts, and webhooks for all AI coding agents.
 
 View all installed skills in your project anytime:
 ```bash
