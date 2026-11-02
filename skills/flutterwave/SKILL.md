@@ -345,3 +345,4 @@ export function handleFlutterwaveWebhook(req: Request) {
 2. **Never Trust Redirect URLs:** Never fulfill an order simply because a customer landed on `redirect_url?status=successful`. Always execute server-side verification.
 3. **Deterministic References:** Provide a unique `tx_ref` or `reference` on every payment and payout to avoid collision and guarantee idempotency.
 4. **Credential Security:** Store `FLW_SECRET_KEY`, `FLW_V4_CLIENT_ID`, `FLW_V4_CLIENT_SECRET`, and `FLW_WEBHOOK_HASH` in secure environment variables. Never commit credentials to git.
+
